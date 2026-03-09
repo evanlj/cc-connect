@@ -1,0 +1,4 @@
+interface:
+  display_name: "TAPD Bug Remediation Flow"
+  short_description: "Fix TAPD defects with strict gates: clarify with user, confirm prompts, backfill, execute, accept, and iterate on FAIL"
+  default_prompt: "Run the TAPD defect remediation workflow with mandatory user-confirmed defect conclusion and prompt backfills."
