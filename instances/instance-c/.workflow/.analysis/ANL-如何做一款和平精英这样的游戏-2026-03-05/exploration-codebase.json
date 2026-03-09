@@ -1,0 +1,28 @@
+{
+  "project_type": "none",
+  "topic_mode": "pure-analysis",
+  "relevant_files": [],
+  "patterns": [],
+  "constraints": [
+    "当前会话主题是行业级产品分析，不依赖本仓库代码上下文",
+    "结论基于通用多人在线射击游戏（战术竞技）研发实践，不指向某个现有商业代码库"
+  ],
+  "integration_points": [
+    {
+      "location": "client-server architecture",
+      "description": "客户端渲染与输入，服务端负责权威判定（命中、伤害、位置校验）"
+    },
+    {
+      "location": "content production pipeline",
+      "description": "地图、武器、数值、活动配置需可热更新并可灰度发布"
+    }
+  ],
+  "key_findings": [
+    "该题目的关键不是单点功能，而是玩法、工程、运营、合规的系统工程协同",
+    "最稳路径是先做可验证核心循环（MVP），再逐步引入复杂能力（反作弊、赛季化运营、商业化）"
+  ],
+  "_metadata": {
+    "timestamp": "2026-03-05T16:24:02+08:00",
+    "exploration_scope": "industry-practice synthesis"
+  }
+}

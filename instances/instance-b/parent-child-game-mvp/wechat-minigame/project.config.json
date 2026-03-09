@@ -1,0 +1,11 @@
+{
+  "description": "父子互动小游戏 MVP",
+  "setting": {
+    "urlCheck": false,
+    "es6": true,
+    "enhance": true
+  },
+  "compileType": "game",
+  "libVersion": "2.31.0"
+}
+
