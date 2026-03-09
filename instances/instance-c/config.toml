@@ -1,0 +1,51 @@
+data_dir = "D:/ai-github/cc-connect/instances/instance-c/data"
+language = "zh"
+
+[[projects]]
+  name = "instance-c-project"
+  [projects.agent]
+    type = "codex"
+    [projects.agent.options]
+      mode = "yolo"
+      provider = "rc"
+      work_dir = "D:/ai-github/cc-connect/instances/instance-c"
+
+    [[projects.agent.providers]]
+      name = "rc"
+      api_key = "sk-ed3199aad41c43bebccc14340ebd7741"
+      base_url = "https://right.codes/codex/v1"
+      model = "gpt-5.3-codex"
+
+    [[projects.agent.providers]]
+      name = "codez"
+      api_key = "sk-BXPhBqt16uaEgGElLx9IpOJmfLRSwYtBQ7NjHlbMaCEBKy88"
+      base_url = "https://api.zwenooo.link/v1"
+      model = "gpt-5.3-codex"
+
+  [[projects.platforms]]
+    type = "feishu"
+    [projects.platforms.options]
+      allow_from = "*"
+      app_id = "cli_a92c2fa6c7f99cc4"
+      app_secret = "EryEgoZPzIHPxzLgjTdmYey0555fFkvs"
+      reaction_emoji = "OnIt"
+
+[log]
+  level = "info"
+
+[speech]
+  enabled = false
+  provider = ""
+  language = ""
+  [speech.openai]
+    api_key = ""
+    base_url = ""
+    model = ""
+  [speech.groq]
+    api_key = ""
+    model = ""
+
+[display]
+  thinking_max_len = 300
+  tool_max_len = 500
+
