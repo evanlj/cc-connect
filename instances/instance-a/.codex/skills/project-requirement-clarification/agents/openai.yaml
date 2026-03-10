@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project Requirement Clarification"
+  short_description: "Auto-trigger on '创建tapd需求' and refine brief prompts into final, testable requirements."
+  default_prompt: "当我输入“创建tapd需求”时，先做需求澄清循环，确认最终需求基线后再进入 TAPD 创建。"
