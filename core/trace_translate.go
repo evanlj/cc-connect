@@ -3,6 +3,8 @@ package core
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -84,8 +86,8 @@ type TraceTranslateCfg struct {
 //
 // Enable via Agent.Options, for example:
 //
-//   trace_translate_enabled = true
-//   trace_translate_path = "D:/ai-github/cc-connect/instances/instance-a/data/traces/codex"
+//	trace_translate_enabled = true
+//	trace_translate_path = "D:/ai-github/cc-connect/instances/instance-a/data/traces/codex"
 //
 // If trace_translate_path is omitted, it defaults to: <work_dir>/data/traces/codex
 func (e *Engine) StartTraceTranslate(agentOptions map[string]any) {
@@ -257,21 +259,21 @@ func parseTraceTranslateCfg(opts map[string]any) TraceTranslateCfg {
 	}
 
 	return TraceTranslateCfg{
-		Enabled:      enabled,
-		WatchPath:    watchPath,
-		FollowLatest: getBool("trace_translate_follow_latest", true),
+		Enabled:          enabled,
+		WatchPath:        watchPath,
+		FollowLatest:     getBool("trace_translate_follow_latest", true),
 		TargetSessionKey: strings.TrimSpace(getString("trace_translate_target_session_key", "")),
-		FromStart:    getBool("trace_translate_from_start", false),
-		PollInterval: time.Duration(pollMs) * time.Millisecond,
-		ScanInterval: time.Duration(scanMs) * time.Millisecond,
-		Reasoning:    getBool("trace_translate_reasoning", true),
-		AgentMessage: getBool("trace_translate_agent_message", false),
-		ForwardOnly:  getBool("trace_translate_forward_only", false),
-		ShowOriginal: getBool("trace_translate_show_original", false),
-		Prefix:       getString("trace_translate_prefix", ""),
-		PurgeAfter:   time.Duration(purgeMin) * time.Minute,
-		MaxSendChars: maxSendChars,
-		OnlyMode:     getBool("trace_translate_only", false),
+		FromStart:        getBool("trace_translate_from_start", false),
+		PollInterval:     time.Duration(pollMs) * time.Millisecond,
+		ScanInterval:     time.Duration(scanMs) * time.Millisecond,
+		Reasoning:        getBool("trace_translate_reasoning", true),
+		AgentMessage:     getBool("trace_translate_agent_message", false),
+		ForwardOnly:      getBool("trace_translate_forward_only", false),
+		ShowOriginal:     getBool("trace_translate_show_original", false),
+		Prefix:           getString("trace_translate_prefix", ""),
+		PurgeAfter:       time.Duration(purgeMin) * time.Minute,
+		MaxSendChars:     maxSendChars,
+		OnlyMode:         getBool("trace_translate_only", false),
 	}
 }
 
@@ -341,7 +343,7 @@ func providerFromWatchedInstanceConfig(watchPath string) *ProviderConfig {
 	// Minimal TOML decode: only extract provider + providers.
 	var raw struct {
 		Projects []struct {
-			Name string `toml:"name"`
+			Name  string `toml:"name"`
 			Agent struct {
 				Options   map[string]any `toml:"options"`
 				Providers []struct {
@@ -395,6 +397,21 @@ type traceTranslateService struct {
 	mu    sync.Mutex
 	files map[string]*traceFileState
 
+	// Deduplicate outgoing messages across file re-attach / rescans.
+	//
+	// Why needed:
+	// - In follow_latest mode we may temporarily lose track of the "latest" file due to
+	//   transient filesystem errors and then re-attach to the same file.
+	// - In purge mode we may drop file state and later re-attach.
+	// - When re-attaching, per-file `seen` map is reset and old items could be re-sent.
+	//
+	// This cache prevents spamming chat with repeated tail items when the watched instance
+	// is idle (no new output).
+	sentKeys        map[string]time.Time
+	lastSentKeysGC  time.Time
+	sentKeysWindow  time.Duration
+	sentKeysMaxSize int
+
 	// Failure tracking for auto-diagnosis (so users can locate issues without digging logs).
 	failCount          int
 	lastFailAt         time.Time
@@ -407,6 +424,7 @@ type traceTranslateJob struct {
 	itemType   string // "reasoning" | "agent_message"
 	itemID     string
 	text       string
+	dedupeKey  string // stable key used for cross-rescan dedupe
 }
 
 type traceFileState struct {
@@ -454,6 +472,10 @@ func newTraceTranslateService(ctx context.Context, platforms []Platform, provide
 		client:    &http.Client{Timeout: 60 * time.Second},
 		jobs:      make(chan traceTranslateJob, 128),
 		files:     make(map[string]*traceFileState),
+		sentKeys:  make(map[string]time.Time),
+		// A conservative window: suppress duplicates for a while to avoid spam, but don't grow forever.
+		sentKeysWindow:  12 * time.Hour,
+		sentKeysMaxSize: 8192,
 	}
 }
 
@@ -476,6 +498,73 @@ func (s *traceTranslateService) snapshot() traceTranslateSnapshot {
 		snap.ProviderModel = s.provider.Model
 	}
 	return snap
+}
+
+func shortTextHash(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	// short hash is enough for dedupe keys
+	return hex.EncodeToString(sum[:8])
+}
+
+func (s *traceTranslateService) isDuplicateAndRemember(key string) bool {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return false
+	}
+
+	now := time.Now()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.sentKeys == nil {
+		s.sentKeys = make(map[string]time.Time)
+	}
+
+	if t, ok := s.sentKeys[key]; ok {
+		if s.sentKeysWindow <= 0 || now.Sub(t) < s.sentKeysWindow {
+			return true
+		}
+	}
+	s.sentKeys[key] = now
+
+	// Periodic GC (size or time based) to keep memory bounded.
+	needGC := false
+	if s.sentKeysMaxSize > 0 && len(s.sentKeys) > s.sentKeysMaxSize {
+		needGC = true
+	}
+	if now.Sub(s.lastSentKeysGC) > 5*time.Minute {
+		needGC = true
+	}
+	if !needGC {
+		return false
+	}
+
+	cutoff := now.Add(-s.sentKeysWindow)
+	if s.sentKeysWindow <= 0 {
+		// No window means we only do size-based GC.
+		cutoff = time.Time{}
+	}
+
+	for k, t := range s.sentKeys {
+		if !cutoff.IsZero() && t.Before(cutoff) {
+			delete(s.sentKeys, k)
+		}
+	}
+	// If still too large, drop oldest-ish by random iteration (good enough).
+	if s.sentKeysMaxSize > 0 && len(s.sentKeys) > s.sentKeysMaxSize {
+		excess := len(s.sentKeys) - s.sentKeysMaxSize
+		for k := range s.sentKeys {
+			delete(s.sentKeys, k)
+			excess--
+			if excess <= 0 {
+				break
+			}
+		}
+	}
+	s.lastSentKeysGC = now
+
+	return false
 }
 
 func (s *traceTranslateService) SwitchWatchPath(newPath string) error {
@@ -666,7 +755,10 @@ func (s *traceTranslateService) scanFiles() {
 	defer s.mu.Unlock()
 
 	// If we only follow the latest file, keep the state map small (single file).
-	if followLatest && info.IsDir() {
+	// IMPORTANT: only prune existing states when we successfully found at least one candidate path.
+	// Otherwise, a transient "cannot list dir" / "cannot stat file" hiccup could clear `s.files`,
+	// and the next scan will re-attach and replay tail items, spamming the chat.
+	if followLatest && info.IsDir() && len(paths) > 0 {
 		keep := map[string]bool{}
 		for _, p := range paths {
 			keep[p] = true
@@ -832,24 +924,28 @@ func (s *traceTranslateService) processLine(st *traceFileState, line string) {
 	}
 
 	id := raw.Item.ID
-	seenKey := itemType + "|" + id
-	if id != "" {
-		if _, ok := st.seen[seenKey]; ok {
-			return
-		}
-		st.seen[seenKey] = struct{}{}
-	}
-
 	text := raw.Item.Text
 	if strings.TrimSpace(text) == "" {
 		return
 	}
+
+	// Per-file dedupe.
+	// Note: some providers/events may not emit a stable item.id, so fall back to text hash.
+	seenKey := itemType + "|" + id
+	if strings.TrimSpace(id) == "" {
+		seenKey = itemType + "|sha:" + shortTextHash(text)
+	}
+	if _, ok := st.seen[seenKey]; ok {
+		return
+	}
+	st.seen[seenKey] = struct{}{}
 
 	job := traceTranslateJob{
 		sessionKey: st.sessionKey,
 		itemType:   itemType,
 		itemID:     id,
 		text:       text,
+		dedupeKey:  st.path + "|" + seenKey,
 	}
 	if strings.TrimSpace(s.cfg.TargetSessionKey) != "" {
 		job.sessionKey = strings.TrimSpace(s.cfg.TargetSessionKey)
@@ -902,6 +998,11 @@ func (s *traceTranslateService) workerLoop() {
 		case <-s.ctx.Done():
 			return
 		default:
+		}
+
+		// Cross-rescan dedupe: prevent spamming repeated tail items when file state is re-created.
+		if s.isDuplicateAndRemember(job.dedupeKey) {
+			continue
 		}
 
 		msg := s.translateJob(job)
