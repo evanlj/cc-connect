@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -90,9 +91,11 @@ func main() {
 	config.ConfigPath = configPath
 	slog.Info("config loaded", "path", configPath)
 
-	setupLogger(cfg.Log.Level)
+	setupLogger(cfg.Log.Level, cfg.DataDir)
 
 	engines := make([]*core.Engine, 0, len(cfg.Projects))
+	// Keep per-engine agent options so we can start optional background helpers (e.g. trace translation).
+	engineAgentOptions := make([]map[string]any, 0, len(cfg.Projects))
 
 	for _, proj := range cfg.Projects {
 		agent, err := core.CreateAgent(proj.Agent.Type, proj.Agent.Options)
@@ -115,7 +118,22 @@ func main() {
 			}
 			ps.SetProviders(providers)
 			if active, _ := proj.Agent.Options["provider"].(string); active != "" {
-				ps.SetActiveProvider(active)
+				if !ps.SetActiveProvider(active) {
+					fallback := providers[0].Name
+					_ = ps.SetActiveProvider(fallback)
+					slog.Warn("configured provider not found, falling back to first provider",
+						"project", proj.Name,
+						"configured", active,
+						"fallback", fallback,
+					)
+				}
+			} else {
+				fallback := providers[0].Name
+				_ = ps.SetActiveProvider(fallback)
+				slog.Info("no active provider configured, using first provider by default",
+					"project", proj.Name,
+					"provider", fallback,
+				)
 			}
 		}
 
@@ -217,6 +235,7 @@ func main() {
 		})
 
 		engines = append(engines, engine)
+		engineAgentOptions = append(engineAgentOptions, proj.Agent.Options)
 	}
 
 	// Start cron scheduler
@@ -233,11 +252,15 @@ func main() {
 		}
 	}
 
-	for _, e := range engines {
+	for i, e := range engines {
 		if err := e.Start(); err != nil {
 			slog.Error("failed to start engine", "error", err)
 			os.Exit(1)
 		}
+
+		// Optional helper: watch Codex trace jsonl → translate → send to chat.
+		// (Disabled by default; enable via trace_translate_* keys in agent.options.)
+		e.StartTraceTranslate(engineAgentOptions[i])
 	}
 
 	if cronSched != nil {
@@ -365,7 +388,7 @@ app_secret = "your-feishu-app-secret"
 	return os.WriteFile(path, []byte(tmpl), 0o644)
 }
 
-func setupLogger(level string) {
+func setupLogger(level string, dataDir string) {
 	var logLevel slog.Level
 	switch level {
 	case "debug":
@@ -377,7 +400,19 @@ func setupLogger(level string) {
 	default:
 		logLevel = slog.LevelInfo
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: logLevel,
-	})))
+
+	// Always log to stdout; additionally append to a file under data_dir/run/cc-connect.log.
+	// This is important for background instances started via *.bat where stdout is not visible.
+	writer := io.Writer(os.Stdout)
+	if strings.TrimSpace(dataDir) != "" {
+		logDir := filepath.Join(filepath.FromSlash(dataDir), "run")
+		if err := os.MkdirAll(logDir, 0o755); err == nil {
+			logFile := filepath.Join(logDir, "cc-connect.log")
+			if f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+				writer = io.MultiWriter(os.Stdout, f)
+			}
+		}
+	}
+
+	slog.SetDefault(slog.New(slog.NewTextHandler(writer, &slog.HandlerOptions{Level: logLevel})))
 }

@@ -13,6 +13,7 @@ import (
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+	larkcb "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 )
@@ -84,6 +85,9 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		}).
 		OnP2MessageReactionCreatedV1(func(ctx context.Context, event *larkim.P2MessageReactionCreatedV1) error {
 			return nil // ignore reaction events (triggered by our own addReaction)
+		}).
+		OnP2CardActionTrigger(func(ctx context.Context, event *larkcb.CardActionTriggerEvent) (*larkcb.CardActionTriggerResponse, error) {
+			return p.onCardAction(ctx, event)
 		})
 
 	p.wsClient = larkws.NewClient(p.appID, p.appSecret,
@@ -122,6 +126,7 @@ func (p *Platform) addReaction(messageID string) {
 		}
 		if !resp.Success() {
 			slog.Debug("feishu: add reaction failed", "code", resp.Code, "msg", resp.Msg)
+			return
 		}
 	}()
 }
@@ -174,6 +179,16 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 			slog.Error("feishu: failed to parse text content", "error", err)
 			return nil
 		}
+
+		// Built-in “menu” shortcut: show an interactive card with buttons.
+		// This improves discoverability when users forget keywords/skills.
+		if p.shouldShowMenuCard(textBody.Text) {
+			if err := p.replyMenuCard(context.Background(), rctx); err != nil {
+				slog.Error("feishu: reply menu card failed", "error", err)
+			}
+			return nil
+		}
+
 		p.handler(p, &core.Message{
 			SessionKey: sessionKey, Platform: "feishu",
 			UserID: userID, UserName: userName,
@@ -196,7 +211,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		p.handler(p, &core.Message{
 			SessionKey: sessionKey, Platform: "feishu",
 			UserID: userID, UserName: userName,
-			Images:  []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
+			Images:   []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
 			ReplyCtx: rctx,
 		})
 
@@ -254,6 +269,135 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	}
 	if !resp.Success() {
 		return fmt.Errorf("feishu: reply failed code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	return nil
+}
+
+func (p *Platform) onCardAction(ctx context.Context, event *larkcb.CardActionTriggerEvent) (*larkcb.CardActionTriggerResponse, error) {
+	if event == nil || event.Event == nil || event.Event.Action == nil {
+		return nil, nil
+	}
+
+	userID := ""
+	if event.Event.Operator != nil {
+		userID = event.Event.Operator.OpenID
+	}
+
+	chatID := ""
+	messageID := ""
+	if event.Event.Context != nil {
+		chatID = event.Event.Context.OpenChatID
+		messageID = event.Event.Context.OpenMessageID
+	}
+
+	// Hard gate: allowlist.
+	if userID != "" && !core.AllowList(p.allowFrom, userID) {
+		slog.Debug("feishu: card action from unauthorized user", "user", userID)
+		return nil, nil
+	}
+
+	val := event.Event.Action.Value
+	if val == nil {
+		return nil, nil
+	}
+
+	ccAction, _ := val["cc_action"].(string)
+	if ccAction != "menu_select" {
+		// Ignore other cards (not ours).
+		return nil, nil
+	}
+
+	choice, _ := val["choice"].(string)
+	choice = strings.ToLower(strings.TrimSpace(choice))
+
+	var synthetic string
+	var toast string
+	switch choice {
+	case "tapd":
+		synthetic = "选择：TAPD（需求/缺陷/验收/回填）"
+		toast = "已选择 TAPD"
+	case "openspec":
+		synthetic = "选择：OpenSpec 发布到 HTTP（站点 / task-hub / memory）"
+		toast = "已选择 OpenSpec 发布"
+	case "unity":
+		synthetic = "选择：Unity / AGame（boss/场景/材质/shader/相机/AI/脚本报错）"
+		toast = "已选择 Unity / AGame"
+	case "dev":
+		synthetic = "选择：代码实现 / 调试 / 文档"
+		toast = "已选择 代码/文档"
+	default:
+		toast = "未识别的选择"
+	}
+
+	// Feed selection back into the normal message pipeline so the agent can continue.
+	if synthetic != "" && p.handler != nil && chatID != "" && userID != "" {
+		sessionKey := fmt.Sprintf("feishu:%s:%s", chatID, userID)
+		rctx := replyContext{messageID: messageID, chatID: chatID}
+		p.handler(p, &core.Message{
+			SessionKey: sessionKey, Platform: "feishu",
+			UserID: userID, UserName: "feishu_user",
+			Content: synthetic,
+			ReplyCtx: rctx,
+		})
+	}
+
+	if toast == "" {
+		return nil, nil
+	}
+
+	return &larkcb.CardActionTriggerResponse{
+		Toast: &larkcb.Toast{
+			Type:    "info",
+			Content: toast,
+		},
+	}, nil
+}
+
+func (p *Platform) shouldShowMenuCard(text string) bool {
+	t := strings.TrimSpace(text)
+	if t == "" {
+		return false
+	}
+
+	// Normalize trailing punctuation.
+	t = strings.Trim(t, "？?!.。")
+
+	// Exact-match triggers only (avoid false positives like “帮助我修复 bug ...”).
+	switch strings.ToLower(t) {
+	case "菜单", "/menu",
+		"help", "/help", "帮助",
+		"关键词", "触发词",
+		"能做什么", "你能做什么",
+		"有哪些功能", "你有哪些功能",
+		"有哪些技能", "你有哪些技能",
+		"怎么用", "忘了",
+		"?", "？",
+		"hi", "hello", "你好", "在吗", "...":
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *Platform) replyMenuCard(ctx context.Context, rc replyContext) error {
+	if rc.messageID == "" {
+		return fmt.Errorf("feishu: messageID is empty, cannot reply menu card")
+	}
+
+	cardJSON := buildMenuCardJSON()
+
+	resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
+		MessageId(rc.messageID).
+		Body(larkim.NewReplyMessageReqBodyBuilder().
+			MsgType(larkim.MsgTypeInteractive).
+			Content(cardJSON).
+			Build()).
+		Build())
+	if err != nil {
+		return fmt.Errorf("feishu: reply menu card api call: %w", err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("feishu: reply menu card failed code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	return nil
 }
@@ -423,6 +567,84 @@ func buildCardJSON(content string) string {
 			},
 		},
 	}
+	b, _ := json.Marshal(card)
+	return string(b)
+}
+
+func buildMenuCardJSON() string {
+	// Keep this menu short (1 screen). The agent will do the follow-up questions
+	// after the user clicks.
+	card := map[string]any{
+		"config": map[string]any{
+			"wide_screen_mode": true,
+		},
+		"header": map[string]any{
+			"title": map[string]any{
+				"tag":     "plain_text",
+				"content": "快捷菜单（点按钮继续）",
+			},
+			"template": "blue",
+		},
+		"elements": []any{
+			map[string]any{
+				"tag": "div",
+				"text": map[string]any{
+					"tag": "lark_md",
+					"content": "忘记关键字时可直接用这个菜单。\n\n" +
+						"请选择一个方向：",
+				},
+			},
+			map[string]any{
+				"tag": "action",
+				"actions": []any{
+					map[string]any{
+						"tag":  "button",
+						"type": "primary",
+						"text": map[string]any{"tag": "plain_text", "content": "1) TAPD"},
+						"value": map[string]any{
+							"cc_action": "menu_select",
+							"choice":    "tapd",
+						},
+					},
+					map[string]any{
+						"tag":  "button",
+						"type": "default",
+						"text": map[string]any{"tag": "plain_text", "content": "2) OpenSpec 发布"},
+						"value": map[string]any{
+							"cc_action": "menu_select",
+							"choice":    "openspec",
+						},
+					},
+					map[string]any{
+						"tag":  "button",
+						"type": "default",
+						"text": map[string]any{"tag": "plain_text", "content": "3) Unity / AGame"},
+						"value": map[string]any{
+							"cc_action": "menu_select",
+							"choice":    "unity",
+						},
+					},
+					map[string]any{
+						"tag":  "button",
+						"type": "default",
+						"text": map[string]any{"tag": "plain_text", "content": "4) 代码/文档"},
+						"value": map[string]any{
+							"cc_action": "menu_select",
+							"choice":    "dev",
+						},
+					},
+				},
+			},
+			map[string]any{
+				"tag": "div",
+				"text": map[string]any{
+					"tag":     "lark_md",
+					"content": "也可以直接发一句话描述需求（比如：`查 workspace_id=66052431 未完成需求`）。",
+				},
+			},
+		},
+	}
+
 	b, _ := json.Marshal(card)
 	return string(b)
 }

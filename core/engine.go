@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -50,6 +51,11 @@ type Engine struct {
 
 	cronScheduler *CronScheduler
 
+	// When true, this engine will not execute normal agent tasks.
+	// It will still accept slash commands and background helpers (e.g. trace translation).
+	traceTranslateOnly bool
+	traceTranslateSvc  *traceTranslateService
+
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
@@ -64,6 +70,7 @@ type interactiveState struct {
 	pending      *pendingPermission
 	approveAll   bool // when true, auto-approve all permission requests for this session
 	quiet        bool // when true, suppress thinking and tool progress messages
+	autoResume   int  // auto-resume attempt counter (per session)
 }
 
 // pendingPermission represents a permission request waiting for user response.
@@ -220,13 +227,24 @@ func (e *Engine) Stop() error {
 }
 
 func (e *Engine) handleMessage(p Platform, msg *Message) {
+	content := strings.TrimSpace(msg.Content)
+
+	// Translation-only mode: ignore all normal messages (including images/voice) to avoid
+	// accidentally running agent tasks or creating feedback loops. Only slash commands work.
+	// This is intended for a dedicated "trace translate & push" cc-connect process.
+	if e.traceTranslateOnly {
+		if len(msg.Images) == 0 && msg.Audio == nil && strings.HasPrefix(content, "/") {
+			e.handleCommand(p, msg, content)
+		}
+		return
+	}
+
 	// Voice message: transcribe to text first
 	if msg.Audio != nil {
 		e.handleVoiceMessage(p, msg)
 		return
 	}
 
-	content := strings.TrimSpace(msg.Content)
 	if content == "" && len(msg.Images) == 0 {
 		return
 	}
@@ -412,6 +430,9 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 	state.mu.Lock()
 	state.platform = p
 	state.replyCtx = msg.ReplyCtx
+	// Reset auto-resume budget for each NEW user message.
+	// (We still cap auto-resume inside the same message to avoid infinite loops.)
+	state.autoResume = 0
 	state.mu.Unlock()
 
 	if state.agentSession == nil {
@@ -441,7 +462,19 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 		}
 	}
 
-	e.processInteractiveEvents(state, session, msg.SessionKey)
+	// Quiet mode suppresses intermediate messages. If the platform supports a
+	// sending a visible "executing" message.
+	state.mu.Lock()
+	quiet := state.quiet
+	state.mu.Unlock()
+	if quiet {
+		// In quiet mode we suppress intermediate thinking/tool messages, which can make
+		// long-running turns feel "stuck" from the user's perspective. Send a single
+		// lightweight acknowledgement so users know execution has started.
+		e.send(p, msg.ReplyCtx, e.i18n.T(MsgQuietAck))
+	}
+
+	e.processInteractiveEvents(state, session, msg.SessionKey, msg.Content)
 }
 
 func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, replyCtx any, session *Session) *interactiveState {
@@ -473,17 +506,31 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 	agentSession, err := e.agent.StartSession(e.ctx, session.AgentSessionID)
 	if err != nil {
 		slog.Error("failed to start interactive session", "error", err)
-		state = &interactiveState{platform: p, replyCtx: replyCtx}
-		e.interactiveStates[sessionKey] = state
+		if !ok || state == nil {
+			state = &interactiveState{platform: p, replyCtx: replyCtx}
+			e.interactiveStates[sessionKey] = state
+			return state
+		}
+		// Preserve existing flags (quiet/approveAll) even if session start fails.
+		state.platform = p
+		state.replyCtx = replyCtx
+		state.agentSession = nil
 		return state
 	}
 
-	state = &interactiveState{
-		agentSession: agentSession,
-		platform:     p,
-		replyCtx:     replyCtx,
+	// Preserve per-session flags (quiet, approveAll, etc.) across restarts.
+	if ok && state != nil {
+		state.agentSession = agentSession
+		state.platform = p
+		state.replyCtx = replyCtx
+	} else {
+		state = &interactiveState{
+			agentSession: agentSession,
+			platform:     p,
+			replyCtx:     replyCtx,
+		}
+		e.interactiveStates[sessionKey] = state
 	}
-	e.interactiveStates[sessionKey] = state
 
 	slog.Info("interactive session started", "session_key", sessionKey, "agent_session", session.AgentSessionID)
 	return state
@@ -500,7 +547,7 @@ func (e *Engine) cleanupInteractiveState(sessionKey string) {
 	delete(e.interactiveStates, sessionKey)
 }
 
-func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessionKey string) {
+func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessionKey string, originalPrompt string) {
 	var textParts []string
 	toolCount := 0
 
@@ -610,6 +657,42 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventError:
 			if event.Error != nil {
+				var idleErr *AgentIdleTimeoutError
+				if errors.As(event.Error, &idleErr) && idleErr != nil && strings.EqualFold(idleErr.Agent, "codex") {
+					state.mu.Lock()
+					canAutoResume := state.autoResume < 1
+					quiet := state.quiet
+					if canAutoResume {
+						state.autoResume++
+						state.pending = nil
+					}
+					state.mu.Unlock()
+
+					if canAutoResume {
+						// Reset aggregation for the resumed turn.
+						textParts = nil
+						toolCount = 0
+
+						if !quiet {
+							e.send(p, replyCtx, fmt.Sprintf("⏳ AI 长时间无输出（%ds），已自动中止并尝试继续执行。", int(idleErr.Idle.Seconds())))
+						}
+
+						resumePrompt := fmt.Sprintf(
+							"上一轮执行疑似卡住（连续 %ds 无输出）已中止。请在同一会话继续完成用户任务。\n\n用户任务：%s\n\n要求：\n1) 先检查当前工作区状态（已改文件/已生成产物/已执行到哪一步）。\n2) 用 5-10 行总结你已完成与未完成的部分。\n3) 只继续未完成部分，避免重复执行可能产生副作用的步骤。\n4) 若无法判断进度，先提出 1 个最关键的问题让我确认后再继续。",
+							int(idleErr.Idle.Seconds()),
+							originalPrompt,
+						)
+
+						if err := state.agentSession.Send(resumePrompt, nil); err != nil {
+							slog.Error("auto-resume send failed", "error", err)
+							e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+							return
+						}
+						// Continue consuming events from the same AgentSession (new turn will stream into the same channel).
+						continue
+					}
+				}
+
 				slog.Error("agent error", "error", event.Error)
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
 			}
@@ -653,6 +736,10 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) {
 		e.cmdSwitch(p, msg, args)
 	case "/current":
 		e.cmdCurrent(p, msg)
+	case "/sessionkey", "/session-key", "/session_key":
+		e.cmdSessionKey(p, msg)
+	case "/trace", "/watch", "/listen":
+		e.cmdTrace(p, msg, args)
 	case "/status":
 		e.cmdStatus(p, msg)
 	case "/history":
@@ -683,6 +770,130 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) {
 		e.reply(p, msg.ReplyCtx, VersionInfo)
 	default:
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf("Unknown command: %s\nType /help for available commands.", cmd))
+	}
+}
+
+func (e *Engine) cmdSessionKey(p Platform, msg *Message) {
+	// Useful for configuring trace_translate_target_session_key.
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf("SessionKey: `%s`", msg.SessionKey))
+}
+
+func (e *Engine) cmdTrace(p Platform, msg *Message, args []string) {
+	isZh := e.i18n.CurrentLang() == LangChinese
+	if e.traceTranslateSvc == nil {
+		if isZh {
+			e.reply(p, msg.ReplyCtx, "当前项目未启用 trace 同步/翻译（trace_translate_enabled=false）。")
+		} else {
+			e.reply(p, msg.ReplyCtx, "Trace translate/forward is not enabled for this project (trace_translate_enabled=false).")
+		}
+		return
+	}
+
+	// No args: show status and usage
+	if len(args) == 0 {
+		snap := e.traceTranslateSvc.snapshot()
+		var b strings.Builder
+		if isZh {
+			if snap.ForwardOnly {
+				b.WriteString("📡 Trace 同步（直通，不翻译）\n\n")
+			} else {
+				b.WriteString("📡 Trace 翻译/同步\n\n")
+			}
+			b.WriteString(fmt.Sprintf("- 当前监听: `%s`\n", snap.WatchPath))
+			b.WriteString(fmt.Sprintf("- follow_latest: `%v`\n", snap.FollowLatest))
+			b.WriteString(fmt.Sprintf("- 目标窗口: `%s`\n", emptyAs(snap.TargetSessionKey, "(自动回发)")))
+			b.WriteString("\n用法：\n")
+			b.WriteString("- `/trace a` 监听 instance-a\n")
+			b.WriteString("- `/trace b` 监听 instance-b\n")
+			b.WriteString("- `/trace c` 监听 instance-c\n")
+			b.WriteString("- `/trace instance-a` 同上\n")
+			b.WriteString("- `/trace path D:/.../data/traces/codex` 监听指定目录/文件\n")
+		} else {
+			if snap.ForwardOnly {
+				b.WriteString("📡 Trace forward (no LLM)\n\n")
+			} else {
+				b.WriteString("📡 Trace translate/forward\n\n")
+			}
+			b.WriteString(fmt.Sprintf("- watch: `%s`\n", snap.WatchPath))
+			b.WriteString(fmt.Sprintf("- follow_latest: `%v`\n", snap.FollowLatest))
+			b.WriteString(fmt.Sprintf("- target_session: `%s`\n", emptyAs(snap.TargetSessionKey, "(auto-reply)")))
+			b.WriteString("\nUsage:\n")
+			b.WriteString("- `/trace a` watch instance-a\n")
+			b.WriteString("- `/trace b` watch instance-b\n")
+			b.WriteString("- `/trace c` watch instance-c\n")
+			b.WriteString("- `/trace instance-a` same\n")
+			b.WriteString("- `/trace path D:/.../data/traces/codex` watch custom dir/file\n")
+		}
+		e.reply(p, msg.ReplyCtx, b.String())
+		return
+	}
+
+	// Support: /trace watch <x>  OR /trace <x>
+	target := strings.TrimSpace(args[0])
+	if (target == "watch" || target == "switch" || target == "follow" || target == "to") && len(args) >= 2 {
+		target = strings.TrimSpace(args[1])
+	}
+
+	// Support: /trace path <abs>
+	if target == "path" && len(args) >= 2 {
+		target = strings.TrimSpace(strings.Join(args[1:], " "))
+		if err := e.traceTranslateSvc.SwitchWatchPath(target); err != nil {
+			if isZh {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ 切换监听失败：%v", err))
+			} else {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Failed to switch watch path: %v", err))
+			}
+			return
+		}
+		snap := e.traceTranslateSvc.snapshot()
+		if isZh {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ 已切换监听：`%s`", snap.WatchPath))
+		} else {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ Watch path switched to: `%s`", snap.WatchPath))
+		}
+		return
+	}
+
+	inst := normalizeInstanceArg(target)
+	if inst == "" {
+		if isZh {
+			e.reply(p, msg.ReplyCtx, "❌ 参数不支持。用法：`/trace a|b|c` 或 `/trace path <目录>`")
+		} else {
+			e.reply(p, msg.ReplyCtx, "❌ Unsupported argument. Usage: `/trace a|b|c` or `/trace path <dir>`")
+		}
+		return
+	}
+
+	// Build watch path based on current watch root (infer repo root from .../instances/...).
+	current := e.traceTranslateSvc.snapshot().WatchPath
+	repoRoot := inferRepoRootFromInstancesPath(current)
+	if repoRoot == "" {
+		repoRoot = inferRepoRootFromWorkingDir()
+		if repoRoot == "" {
+			if isZh {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ 无法从当前路径推断 repo 根目录：%s", current))
+			} else {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Cannot infer repo root from current watch path: %s", current))
+			}
+			return
+		}
+	}
+
+	newWatch := filepath.Join(repoRoot, "instances", inst, "data", "traces", "codex")
+	if err := e.traceTranslateSvc.SwitchWatchPath(newWatch); err != nil {
+		if isZh {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ 切换监听失败：%v", err))
+		} else {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Failed to switch watch path: %v", err))
+		}
+		return
+	}
+
+	snap := e.traceTranslateSvc.snapshot()
+	if isZh {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ 已切换监听：`%s`", snap.WatchPath))
+	} else {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ Now watching: `%s`", snap.WatchPath))
 	}
 }
 
@@ -867,6 +1078,50 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 		}
 	}
 
+	// Trace translation status (optional)
+	if e.traceTranslateSvc != nil {
+		snap := e.traceTranslateSvc.snapshot()
+		var traceStr string
+		if isZh {
+			title := "Trace 翻译: 启用"
+			if snap.ForwardOnly {
+				title = "Trace 同步: 启用（直通，不翻译）"
+			}
+			traceStr = fmt.Sprintf("%s\n- watch: %s\n- follow_latest: %v\n- target_session: %s\n- provider: %s (%s)\n",
+				title,
+				snap.WatchPath,
+				snap.FollowLatest,
+				emptyAs(snap.TargetSessionKey, "(自动回发)"),
+				emptyAs(snap.ProviderName, "(unknown)"),
+				emptyAs(snap.ProviderModel, "(default)"),
+			)
+			if !snap.ForwardOnly && snap.FailCount > 0 {
+				traceStr += fmt.Sprintf("- 连续失败: %d\n- 最近错误: %s\n", snap.FailCount, emptyAs(snap.LastFailErr, "(unknown)"))
+			}
+		} else {
+			title := "Trace translate: enabled"
+			if snap.ForwardOnly {
+				title = "Trace forward: enabled (no LLM)"
+			}
+			traceStr = fmt.Sprintf("%s\n- watch: %s\n- follow_latest: %v\n- target_session: %s\n- provider: %s (%s)\n",
+				title,
+				snap.WatchPath,
+				snap.FollowLatest,
+				emptyAs(snap.TargetSessionKey, "(auto-reply)"),
+				emptyAs(snap.ProviderName, "(unknown)"),
+				emptyAs(snap.ProviderModel, "(default)"),
+			)
+			if !snap.ForwardOnly && snap.FailCount > 0 {
+				traceStr += fmt.Sprintf("- consecutive failures: %d\n- last error: %s\n", snap.FailCount, emptyAs(snap.LastFailErr, "(unknown)"))
+			}
+		}
+		if cronStr == "" {
+			cronStr = traceStr
+		} else {
+			cronStr += traceStr
+		}
+	}
+
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgStatusTitle,
 		e.name,
 		e.agent.Name(),
@@ -912,6 +1167,67 @@ func formatDurationZh(d time.Duration) string {
 		return fmt.Sprintf("%d小时 %d分钟", hours, minutes)
 	}
 	return fmt.Sprintf("%d分钟", minutes)
+}
+
+func emptyAs(v, fallback string) string {
+	if strings.TrimSpace(v) == "" {
+		return fallback
+	}
+	return v
+}
+
+func normalizeInstanceArg(raw string) string {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	s = strings.TrimPrefix(s, "instances/")
+	s = strings.TrimPrefix(s, "instances\\")
+	s = strings.Trim(s, "/\\")
+
+	switch s {
+	case "a", "inst-a", "instance-a":
+		return "instance-a"
+	case "b", "inst-b", "instance-b":
+		return "instance-b"
+	case "c", "inst-c", "instance-c":
+		return "instance-c"
+	}
+
+	if strings.HasPrefix(s, "instance-") {
+		return s
+	}
+	return ""
+}
+
+func inferRepoRootFromInstancesPath(p string) string {
+	p = filepath.Clean(filepath.FromSlash(strings.TrimSpace(p)))
+	if p == "" {
+		return ""
+	}
+	parts := strings.FieldsFunc(p, func(r rune) bool { return r == '\\' || r == '/' })
+	if len(parts) < 3 {
+		return ""
+	}
+	for i := 0; i < len(parts); i++ {
+		if strings.EqualFold(parts[i], "instances") && i > 0 {
+			return filepath.Join(parts[:i]...)
+		}
+	}
+	return ""
+}
+
+func inferRepoRootFromWorkingDir() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	wd = filepath.Clean(wd)
+	if wd == "" {
+		return ""
+	}
+	// If "<wd>/instances" exists, treat wd as repo root.
+	if fi, err := os.Stat(filepath.Join(wd, "instances")); err == nil && fi.IsDir() {
+		return wd
+	}
+	return ""
 }
 
 func (e *Engine) cmdHistory(p Platform, msg *Message, args []string) {
@@ -1417,6 +1733,13 @@ func (e *Engine) switchProvider(p Platform, msg *Message, switcher ProviderSwitc
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderNotFound), name))
 		return
 	}
+
+	// Force next user turn to start a fresh upstream thread so provider switch
+	// takes effect deterministically (instead of resuming prior thread context).
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.AgentSessionID = ""
+	e.sessions.Save()
+
 	e.cleanupInteractiveState(msg.SessionKey)
 
 	if e.providerSaveFunc != nil {

@@ -4,7 +4,7 @@
 1. Role and objective
 2. Strengths and capability boundaries
 3. In-scope / out-of-scope
-4. Inputs (confirmed bug detail + current code state + failure history)
+4. Inputs (confirmed bug detail + confirmed Fix Plan/DoD baseline + current code state + failure history)
 5. Constraints (no unrelated edits, no process restart unless requested)
 6. Required outputs:
    - file changes
@@ -16,7 +16,7 @@
 ## B. Acceptance-Agent Prompt (Must Contain)
 1. Independent auditor role
 2. Strengths and capability boundaries
-3. Validation checklist (itemized)
+3. Validation checklist (itemized, derived from confirmed Fix Plan/DoD + defect acceptance criteria)
 4. Evidence requirements for each checklist item
 5. Output format per item:
    - Acceptance Content

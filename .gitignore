@@ -10,3 +10,32 @@ config.toml
 dist
 test
 RELEASE.md
+
+# -----------------------------
+# Local dev / editor artifacts
+# -----------------------------
+.vscode/
+*.swp
+*~
+
+# -----------------------------
+# Local workflow temp artifacts
+# -----------------------------
+.workflow/
+.tmp*
+.tmp-*/
+.tmp-*.toml
+.tmp-*.json
+
+# -----------------------------
+# Local agent state (Codex / skills runner)
+# These are machine-specific and should never be committed.
+# -----------------------------
+instances/**/.codex/
+instances/**/.workflow/
+instances/**/data/
+instances/**/output/
+instances/**/stdout
+instances/**/stdout.*
+instances/**/.vscode/
+instances/.shared-skills/

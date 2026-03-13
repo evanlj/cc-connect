@@ -177,6 +177,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	mode := a.mode
 	model := a.model
 	extraEnv := a.providerEnvLocked()
+	execConfigArgs := a.providerExecConfigArgsLocked()
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := a.providers[a.activeIdx].Model; m != "" {
@@ -185,7 +186,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.Unlock()
 
-	return newCodexSession(ctx, a.workDir, model, mode, sessionID, extraEnv)
+	return newCodexSession(ctx, a.workDir, model, mode, sessionID, extraEnv, execConfigArgs)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
@@ -293,6 +294,41 @@ func (a *Agent) providerEnvLocked() []string {
 		env = append(env, k+"="+v)
 	}
 	return env
+}
+
+func (a *Agent) providerExecConfigArgsLocked() []string {
+	if a.activeIdx < 0 || a.activeIdx >= len(a.providers) {
+		return nil
+	}
+	p := a.providers[a.activeIdx]
+	if p.BaseURL == "" && p.APIKey == "" {
+		return nil
+	}
+
+	quote := func(v string) string {
+		v = strings.ReplaceAll(v, "\\", "\\\\")
+		v = strings.ReplaceAll(v, "\"", "\\\"")
+		return "\"" + v + "\""
+	}
+
+	// Force Codex CLI to use an isolated runtime provider definition that reads
+	// credentials from environment variables injected by cc-connect. This avoids
+	// ~/.codex/config.toml (global model_provider/login state) hijacking requests.
+	const providerKey = "ccconnect"
+
+	args := []string{
+		"-c", "model_provider=" + quote(providerKey),
+		"-c", fmt.Sprintf("model_providers.%s.name=%s", providerKey, quote(providerKey)),
+		"-c", fmt.Sprintf("model_providers.%s.wire_api=%s", providerKey, quote("responses")),
+		"-c", fmt.Sprintf("model_providers.%s.requires_openai_auth=true", providerKey),
+	}
+	if p.BaseURL != "" {
+		args = append(args, "-c", fmt.Sprintf("model_providers.%s.base_url=%s", providerKey, quote(p.BaseURL)))
+	}
+	if p.APIKey != "" {
+		args = append(args, "-c", fmt.Sprintf("model_providers.%s.env_key=%s", providerKey, quote("OPENAI_API_KEY")))
+	}
+	return args
 }
 
 func (a *Agent) PermissionModes() []core.PermissionModeInfo {

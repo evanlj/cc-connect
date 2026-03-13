@@ -596,6 +596,116 @@ _ "github.com/chenhg5/cc-connect/platform/myplatform"
 
 实现 `core.Agent` 接口并注册，方式与平台相同。
 
+## 实用脚本
+
+### 提取 Codex Trace 的所有 text 字段
+
+Codex 会在 `instances/<instance>/data/traces/codex/YYYY-MM-DD/*.jsonl` 生成 JSONL trace。  
+如果只想保留所有 `text` 字段（不看时间/类型等噪声），用下面脚本生成 `*.replies.txt`：
+
+```bat
+tools\extract-replies.bat "D:\ai-github\cc-connect\instances\instance-a\data\traces\codex\2026-03-12\xxx.jsonl"
+```
+
+批量模式（处理某日期目录下所有 `*.jsonl`）：
+
+```bat
+tools\extract-replies.bat "D:\ai-github\cc-connect\instances\instance-a\data\traces\codex\2026-03-12"
+```
+
+> 需要 PowerShell 7（`pwsh`）。如果只有 Windows PowerShell 5.1，请把脚本里的 `pwsh` 改成 `powershell`。
+
+### Windows 右键菜单（可选）
+
+注册 `.jsonl` 文件与文件夹右键菜单：
+
+```bat
+pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File tools\register-extract-replies-context-menu.ps1
+```
+
+移除菜单：
+
+```bat
+pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File tools\unregister-extract-replies-context-menu.ps1
+```
+
+### 实时跟踪并翻译 Codex 的思考输出（reasoning → 中文）
+
+如果你希望在一个单独的终端里 **实时看到 Codex trace 的 `reasoning`（思考）输出，并自动翻译成中文**，可以用：
+
+```bat
+tools\watch-codex-thinking-zh.bat -Instance instance-c
+```
+
+或直接 PowerShell：
+
+```powershell
+pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File tools\watch-codex-thinking-zh.ps1 -Instance instance-c
+```
+
+默认行为：
+- 自动跟踪 `instances/<instance>/data/traces/codex` 下 **最新** 的 `*.jsonl`（新 turn 产生新文件时会自动切换）
+- 只处理 `type=item.completed` 且 `item.type=reasoning` 的文本
+- 输出为中文（保留 Markdown 与换行）
+
+常用参数：
+- `-FromStart`：从文件开头回放（默认从末尾开始追踪）
+- `-AgentMessage`：同时输出最终回复（`agent_message`）
+- `-ShowOriginal`：先打印原文，再打印中文
+- `-OutFile "D:\...\thinking.zh.txt"`：把中文追加写入文件
+- `-MaxSeconds 60`：运行 60 秒后自动退出（方便自测）
+
+翻译使用的模型参数：
+- 优先读取对应实例 `instances/<instance>/config.toml` 里当前 project 的 provider（`api_key/base_url/model`）
+- 如果无法解析，再回退到环境变量：`OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL`
+
+### （推荐）直接用 cc-connect 自动翻译并推送到飞书会话
+
+如果你希望 **不用单独开终端看输出**，而是让 cc-connect 自己：
+- 监听指定 trace 文件夹里新增的 `*.jsonl`
+- 把 `reasoning`（思考）内容实时翻译成中文
+- 再把中文结果 **主动发送到飞书窗口**
+
+可以在该项目的 `config.toml` 的 `[projects.agent.options]` 下加这些配置，然后重启 cc-connect：
+
+```toml
+[projects.agent.options]
+# 开启 trace 实时翻译推送（默认关闭）
+trace_translate_enabled = true
+
+# 监听目录（可选；不填则默认用 <work_dir>/data/traces/codex）
+trace_translate_path = "D:/ai-github/cc-connect/instances/instance-a/data/traces/codex"
+
+# 只翻译思考（reasoning）；如要把最终回复也翻译，可打开 agent_message
+trace_translate_reasoning = true
+trace_translate_agent_message = false
+
+# 轮询与扫描间隔（可选）
+trace_translate_poll_ms = 500
+trace_translate_scan_ms = 2000
+
+# 只跟踪最新的 turn trace 文件（推荐；默认 true）
+trace_translate_follow_latest = true
+
+# （可选）让该 cc-connect 实例只做翻译推送，不执行任何任务
+trace_translate_only = true
+
+# 输出样式（可选）
+trace_translate_show_original = false
+trace_translate_prefix = "【思考翻译】\\n"
+
+# （可选）把译文统一发到“指定的飞书会话窗口”，而不是原始会话
+# 适合：你想用一个独立飞书窗口专门接收中文思考翻译
+#
+# 获取方法：在目标飞书窗口里对该 cc-connect 发送 `/sessionkey`，复制返回的 SessionKey 粘贴到这里。
+trace_translate_target_session_key = "feishu:oc_xxx:ou_xxx"
+```
+
+说明：
+- 翻译调用会优先复用该项目当前 provider（`api_key/base_url/model`）。如果没配 provider，也会回退读取环境变量：`OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL`。
+- 要能发到目标飞书窗口：本实例使用的飞书 bot 必须在那个群/会话里（否则会发不出去）。
+- `/sessionkey` 会返回当前窗口对应的 session key，方便你配置 `trace_translate_target_session_key`。
+
 ## 项目结构
 
 ```

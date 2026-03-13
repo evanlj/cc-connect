@@ -593,6 +593,110 @@ _ "github.com/chenhg5/cc-connect/platform/myplatform"
 
 Same pattern — implement `core.Agent` and register via `core.RegisterAgent`.
 
+## Helper Scripts
+
+### Extract Text Fields from Codex Trace
+
+Codex sessions emit JSONL trace files under `instances/<instance>/data/traces/codex/YYYY-MM-DD/*.jsonl`.  
+To get a clean, readable log that **concatenates all `text` fields** (no timestamps or event types), use:
+
+```bat
+tools\extract-replies.bat "D:\ai-github\cc-connect\instances\instance-a\data\traces\codex\2026-03-12\xxx.jsonl"
+```
+
+Batch mode (process all `*.jsonl` in a date folder):
+
+```bat
+tools\extract-replies.bat "D:\ai-github\cc-connect\instances\instance-a\data\traces\codex\2026-03-12"
+```
+
+> Requires PowerShell 7 (`pwsh`). If you only have Windows PowerShell 5.1, edit the script to use `powershell` instead.
+
+### Windows Context Menu (Optional)
+
+Register right-click menu for `.jsonl` and folders:
+
+```bat
+pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File tools\register-extract-replies-context-menu.ps1
+```
+
+Remove the menu:
+
+```bat
+pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File tools\unregister-extract-replies-context-menu.ps1
+```
+
+### Live Translate Codex Reasoning Output (ZH)
+
+If you want a separate terminal that **follows the latest Codex trace JSONL** and **translates `reasoning` items to Chinese in real time**, use:
+
+```bat
+tools\watch-codex-thinking-zh.bat -Instance instance-c
+```
+
+Or run the PowerShell script directly:
+
+```powershell
+pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File tools\watch-codex-thinking-zh.ps1 -Instance instance-c
+```
+
+Defaults:
+- Auto-follow the **latest** `*.jsonl` under `instances/<instance>/data/traces/codex` (auto switches when a new turn file appears)
+- Only processes `type=item.completed` where `item.type=reasoning`
+- Keeps Markdown/newlines
+
+Handy flags:
+- `-FromStart` replay from file beginning (default: follow from end)
+- `-AgentMessage` also include final assistant messages (`agent_message`)
+- `-ShowOriginal` print original text before Chinese translation
+- `-OutFile "D:\...\thinking.zh.txt"` append Chinese output to a file
+- `-MaxSeconds 60` auto-exit after N seconds (quick self-test)
+
+Translation config:
+- It first tries to read provider settings from the instance `config.toml` (`api_key/base_url/model`).
+- If that fails, it falls back to env vars: `OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL`.
+
+### (Recommended) Let cc-connect Translate & Push to Feishu Automatically
+
+If you prefer **not** to watch a separate terminal, cc-connect can do this for you:
+- Watch a trace folder for new `*.jsonl`
+- Translate `reasoning` items to Chinese via the configured provider
+- Proactively send the Chinese result to a chat window
+
+Enable it by adding the following keys under your project `[projects.agent.options]` and restarting cc-connect:
+
+```toml
+[projects.agent.options]
+trace_translate_enabled = true
+
+# Optional. If omitted, defaults to: <work_dir>/data/traces/codex
+trace_translate_path = "D:/ai-github/cc-connect/instances/instance-a/data/traces/codex"
+
+trace_translate_reasoning = true
+trace_translate_agent_message = false
+
+trace_translate_poll_ms = 500
+trace_translate_scan_ms = 2000
+
+# Follow only the newest trace file under the folder (recommended; default true)
+trace_translate_follow_latest = true
+
+# Optional: make this cc-connect instance translation-only (no agent tasks)
+trace_translate_only = true
+
+trace_translate_show_original = false
+trace_translate_prefix = "【THINK-ZH】\n"
+
+# Optional: send ALL translations to a dedicated chat instead of the original session.
+# Tip: in the target chat window, send `/sessionkey` and copy the returned SessionKey here.
+trace_translate_target_session_key = "feishu:oc_xxx:ou_xxx"
+```
+
+Notes:
+- No extra API config is needed — it prefers the project's active provider (`api_key/base_url/model`), and falls back to env vars: `OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL`.
+- The Feishu bot used by this cc-connect instance must be present in the target chat, otherwise sends will fail.
+- `/sessionkey` prints the current chat's session key, useful for configuring the target chat.
+
 ## Project Structure
 
 ```

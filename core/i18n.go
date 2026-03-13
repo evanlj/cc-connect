@@ -104,6 +104,7 @@ const (
 	MsgPermissionHint       MsgKey = "permission_hint"
 	MsgQuietOn              MsgKey = "quiet_on"
 	MsgQuietOff             MsgKey = "quiet_off"
+	MsgQuietAck             MsgKey = "quiet_ack"
 	MsgModeChanged          MsgKey = "mode_changed"
 	MsgModeNotSupported     MsgKey = "mode_not_supported"
 	MsgSessionRestarting    MsgKey = "session_restarting"
@@ -131,12 +132,12 @@ const (
 	MsgProviderRemoved      MsgKey = "provider_removed"
 	MsgProviderRemoveFailed MsgKey = "provider_remove_failed"
 
-	MsgVoiceNotEnabled      MsgKey = "voice_not_enabled"
-	MsgVoiceNoFFmpeg        MsgKey = "voice_no_ffmpeg"
-	MsgVoiceTranscribing    MsgKey = "voice_transcribing"
-	MsgVoiceTranscribed     MsgKey = "voice_transcribed"
+	MsgVoiceNotEnabled       MsgKey = "voice_not_enabled"
+	MsgVoiceNoFFmpeg         MsgKey = "voice_no_ffmpeg"
+	MsgVoiceTranscribing     MsgKey = "voice_transcribing"
+	MsgVoiceTranscribed      MsgKey = "voice_transcribed"
 	MsgVoiceTranscribeFailed MsgKey = "voice_transcribe_failed"
-	MsgVoiceEmpty           MsgKey = "voice_empty"
+	MsgVoiceEmpty            MsgKey = "voice_empty"
 
 	MsgCronNotAvailable MsgKey = "cron_not_available"
 	MsgCronUsage        MsgKey = "cron_usage"
@@ -251,6 +252,10 @@ var messages = map[MsgKey]map[Language]string{
 		LangEnglish: "🔔 Quiet mode OFF — thinking and tool progress messages will be shown.",
 		LangChinese: "🔔 安静模式已关闭 — 将恢复推送思考和工具调用进度消息。",
 	},
+	MsgQuietAck: {
+		LangEnglish: "⏳ Executing… (quiet mode: intermediate thinking/tool progress is hidden)\nTip: send `/quiet` to show progress, or `/stop` to cancel.",
+		LangChinese: "⏳ 已开始执行…（安静模式：思考/工具进度不再推送）\n提示：发送 `/quiet` 可恢复进度消息，发送 `/stop` 可中止。",
+	},
 	MsgModeChanged: {
 		LangEnglish: "🔄 Permission mode switched to **%s**. New sessions will use this mode.",
 		LangChinese: "🔄 权限模式已切换为 **%s**，新会话将使用此模式。",
@@ -281,6 +286,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/list\n  List agent sessions\n\n" +
 			"/switch <id>\n  Resume an existing session\n\n" +
 			"/current\n  Show current active session\n\n" +
+			"/sessionkey\n  Show SessionKey for this chat (useful for trace translator)\n\n" +
+			"/trace [a|b|c|path]\n  Switch trace watcher (for translator instance)\n\n" +
 			"/history [n]\n  Show last n messages (default 10)\n\n" +
 			"/provider [list|add|remove|switch]\n  Manage API providers\n\n" +
 			"/memory [add|global|global add]\n  View/edit agent memory files\n\n" +
@@ -301,6 +308,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/list\n  列出 Agent 会话列表\n\n" +
 			"/switch <id>\n  恢复已有会话\n\n" +
 			"/current\n  查看当前活跃会话\n\n" +
+			"/sessionkey\n  输出当前窗口的 SessionKey（用于 trace 翻译推送）\n\n" +
+			"/trace [a|b|c|path]\n  切换监听的 trace 源（用于 translator 实例）\n\n" +
 			"/history [n]\n  查看最近 n 条消息（默认 10）\n\n" +
 			"/provider [list|add|remove|switch]\n  管理 API Provider\n\n" +
 			"/memory [add|global|global add]\n  查看/编辑 Agent 记忆文件\n\n" +

@@ -121,6 +121,13 @@ If user explicitly asks to create a TAPD requirement after confirmation:
 3. Create TAPD requirement via TAPD tooling.
 4. Return created entity ID/link and backfill summary.
 
+### TAPD description formatting (Must)
+TAPD `description` is typically rendered as **rich text** and may **collapse raw newlines**.  
+To keep the requirement readable in TAPD:
+- Prefer HTML-visible formatting: `<p>`, `<br/>`, `<ul><li>`, `<code>`
+- Do **not** rely on Markdown headings like `## ...` for layout
+- If you start from plain multi-line text, apply: `html.escape(text).replace("\n", "<br/>")`
+
 **Mandatory stop after Step 6**:
 - After returning `story_id/link`, ask the user whether they want to proceed to an execution workflow.
 - If the user says yes, *handoff only* (e.g., recommend `tapd-execution-flow`) — do not start execution within this skill.
