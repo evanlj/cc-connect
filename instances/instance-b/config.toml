@@ -14,13 +14,13 @@ language = "zh"
       name = "openai-main"
       api_key = "sk-ed3199aad41c43bebccc14340ebd7741"
       base_url = "https://right.codes/codex/v1"
-      model = "gpt-5.3-codex"
+      model = "gpt-5.2"
 
     [[projects.agent.providers]]
       name = "zwenooo"
       api_key = "sk-BXPhBqt16uaEgGElLx9IpOJmfLRSwYtBQ7NjHlbMaCEBKy88"
       base_url = "https://api.zwenooo.link/v1"
-      model = "gpt-5.3-codex"
+      model = "gpt-5.2"
 
   [[projects.platforms]]
     type = "feishu"

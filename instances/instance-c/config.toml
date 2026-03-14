@@ -7,27 +7,27 @@ language = "zh"
     type = "codex"
     [projects.agent.options]
       mode = "yolo"
-      provider = "rc"
+      provider = "codez"
       work_dir = "D:/ai-github/cc-connect/instances/instance-c"
 
     [[projects.agent.providers]]
       name = "rc"
       api_key = "sk-ed3199aad41c43bebccc14340ebd7741"
       base_url = "https://right.codes/codex/v1"
-      model = "gpt-5.3-codex"
+      model = "gpt-5.2"
 
     [[projects.agent.providers]]
       name = "codez"
       api_key = "sk-BXPhBqt16uaEgGElLx9IpOJmfLRSwYtBQ7NjHlbMaCEBKy88"
       base_url = "https://api.zwenooo.link/v1"
-      model = "gpt-5.3-codex"
+      model = "gpt-5.2"
 
   [[projects.platforms]]
     type = "feishu"
     [projects.platforms.options]
       allow_from = "*"
-      app_id = "cli_a92c2fa6c7f99cc4"
-      app_secret = "EryEgoZPzIHPxzLgjTdmYey0555fFkvs"
+      app_id = "cli_a9240454c0781cc0"
+      app_secret = "IgviflRTpssj8mAubqhGlbezVrd6yp4X"
       reaction_emoji = "OnIt"
 
 [log]
@@ -48,4 +48,3 @@ language = "zh"
 [display]
   thinking_max_len = 300
   tool_max_len = 500
-

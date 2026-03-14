@@ -1,0 +1,4 @@
+interface:
+  display_name: "TAPD Execution Flow"
+  short_description: "Run TAPD stories with strict gates: model confirm, prompt confirm/backfill, execution, acceptance, test cases, status transition"
+  default_prompt: "Execute the current TAPD story with the fixed workflow and produce HTML-ready TAPD backfill content."

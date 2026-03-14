@@ -18,7 +18,7 @@ if exist "%TARGET%\NUL" (
   if not "%OUT%"=="" (
     echo [WARN] Directory mode ignores output arg.
   )
-  pwsh -NoLogo -NoProfile -File "%SCRIPT%" -Target "%TARGET%"
+  pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" -Target "%TARGET%"
   exit /b %ERRORLEVEL%
 )
 
@@ -28,9 +28,9 @@ if not exist "%TARGET%" (
 )
 
 if "%OUT%"=="" (
-  pwsh -NoLogo -NoProfile -File "%SCRIPT%" -Target "%TARGET%"
+  pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" -Target "%TARGET%"
 ) else (
-  pwsh -NoLogo -NoProfile -File "%SCRIPT%" -Target "%TARGET%" -Out "%OUT%"
+  pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" -Target "%TARGET%" -Out "%OUT%"
 )
 exit /b %ERRORLEVEL%
 
@@ -42,4 +42,8 @@ echo   2) Single file + custom output:
 echo      extract-replies.bat "D:\...\file.jsonl" "D:\...\file.replies.txt"
 echo   3) Directory (process all *.jsonl):
 echo      extract-replies.bat "D:\...\2026-03-12"
+echo.
+echo Note:
+echo   The output .replies.txt starts with a header (lines begin with '#')
+echo   including: ts / model / mode / prompt preview.
 exit /b 1
