@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -59,6 +60,13 @@ func (e *Engine) runDebateRoom(ctx context.Context, roomID string) {
 		return
 	}
 
+	board, boardErr := e.debateStore.LoadOrInitBlackboard(room)
+	if boardErr != nil {
+		slog.Warn("debate: load/init blackboard failed", "room_id", roomID, "error", boardErr)
+		board = nil
+	}
+	blackboardPath := e.debateStore.BlackboardFilePath(room.RoomID)
+
 	_ = e.SendBySessionKey(room.OwnerSessionKey, fmt.Sprintf("【Jarvis】讨论开始（room=%s），主题：%s", room.RoomID, room.Question))
 
 	workers := make([]DebateRole, 0, len(room.Roles))
@@ -92,6 +100,10 @@ func (e *Engine) runDebateRoom(ctx context.Context, roomID string) {
 		room.CurrentRound = round
 		room.Status = DebateStatusRunning
 		_ = e.debateStore.SaveRoom(room)
+		UpdateBlackboardRound(board, round, room.MaxRounds)
+		if board != nil {
+			_ = e.debateStore.SaveBlackboard(board)
+		}
 
 		speakers := selectDebateSpeakers(room.SpeakingPolicy, round, workers, spoken, room.MaxRounds)
 		if len(speakers) == 0 {
@@ -126,8 +138,8 @@ func (e *Engine) runDebateRoom(ctx context.Context, roomID string) {
 
 			askReq := AskRequest{
 				Project:     emptyAs(role.Project, role.Instance),
-				SessionKey:  buildRoleSessionKey(room.OwnerSessionKey, room.GroupChatID, role.Role),
-				Prompt:      buildRolePrompt(room, role, round, transcript),
+				SessionKey:  buildRoleSessionKey(room.OwnerSessionKey, room.GroupChatID, room.RoomID, role.Role),
+				Prompt:      flattenPromptForTransport(buildRolePrompt(room, role, round, transcript, board, blackboardPath)),
 				TimeoutSec:  120,
 				Speak:       true,
 				SpeakPrefix: fmt.Sprintf("【%s】", role.DisplayName),
@@ -144,6 +156,10 @@ func (e *Engine) runDebateRoom(ctx context.Context, roomID string) {
 				entry.Content = res.Content
 				entry.LatencyMS = res.LatencyMS
 				spoken[role.Role] = true
+				ApplyRoleContribution(board, role, round, res.Content)
+				if board != nil {
+					_ = e.debateStore.SaveBlackboard(board)
+				}
 			}
 			_ = e.debateStore.AppendTranscript(room.RoomID, entry)
 			transcript = append(transcript, entry)
@@ -162,8 +178,8 @@ func (e *Engine) runDebateRoom(ctx context.Context, roomID string) {
 	room.Status = DebateStatusSummarize
 	_ = e.debateStore.SaveRoom(room)
 
-	summary := e.buildDebateSummary(room, transcript)
-	summarySessionKey := buildRoleSessionKey(room.OwnerSessionKey, room.GroupChatID, "jarvis_summary")
+	summary := e.buildDebateSummary(room, transcript, board)
+	summarySessionKey := buildRoleSessionKey(room.OwnerSessionKey, room.GroupChatID, room.RoomID, "jarvis_summary")
 	if askRes, err := e.AskSession(summarySessionKey, summary, 120*time.Second); err == nil {
 		_ = e.SendBySessionKey(room.OwnerSessionKey, "【Jarvis-总结】\n"+askRes.Content)
 	} else {
@@ -248,7 +264,7 @@ func joinDisplayNames(roles []DebateRole) string {
 	return strings.Join(names, "、")
 }
 
-func buildRoleSessionKey(ownerSessionKey, groupChatID, role string) string {
+func buildRoleSessionKey(ownerSessionKey, groupChatID, roomID, role string) string {
 	platform := "feishu"
 	if idx := strings.Index(ownerSessionKey, ":"); idx > 0 {
 		platform = ownerSessionKey[:idx]
@@ -260,35 +276,93 @@ func buildRoleSessionKey(ownerSessionKey, groupChatID, role string) string {
 	if groupChatID == "" {
 		groupChatID = "unknown_chat"
 	}
-	return fmt.Sprintf("%s:%s:debate_%s", platform, groupChatID, role)
+
+	roomID = normalizeSessionKeyPart(roomID, "room")
+	role = normalizeSessionKeyPart(role, "role")
+	return fmt.Sprintf("%s:%s:debate_%s_%s", platform, groupChatID, roomID, role)
 }
 
-func buildRolePrompt(room *DebateRoom, role DebateRole, round int, transcript []DebateTranscriptEntry) string {
+func buildRolePrompt(room *DebateRoom, role DebateRole, round int, transcript []DebateTranscriptEntry, board *DebateBlackboard, blackboardPath string) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("你是 %s（角色：%s）。\n", role.DisplayName, role.Role))
-	b.WriteString("当前在进行多角色讨论，请基于角色职责给出简明观点。\n\n")
-	b.WriteString(fmt.Sprintf("讨论主题：%s\n", room.Question))
-	b.WriteString(fmt.Sprintf("当前轮次：第 %d 轮（总上限 %d 轮）\n\n", round, room.MaxRounds))
+	b.WriteString("当前在进行多角色讨论。\n")
+	b.WriteString("强约束：先读取黑板文件，再基于黑板里的主题与其他角色发言输出观点。\n")
+	b.WriteString("禁止输出任务接单菜单（例如“回复1/2/3/4”）。\n\n")
 
-	if len(transcript) > 0 {
-		b.WriteString("最近发言摘要：\n")
-		start := 0
-		if len(transcript) > 4 {
-			start = len(transcript) - 4
+	if p := strings.TrimSpace(blackboardPath); p != "" {
+		b.WriteString("[黑板文件]\n")
+		b.WriteString(fmt.Sprintf("- 路径（绝对路径）：%s\n", filepath.ToSlash(p)))
+		if board != nil {
+			b.WriteString(fmt.Sprintf("- 当前 revision：%d\n", board.Revision))
 		}
-		for i := start; i < len(transcript); i++ {
-			t := transcript[i]
-			b.WriteString(fmt.Sprintf("- [%s] %s\n", t.Role, truncateStr(t.Content, 120)))
-		}
-		b.WriteString("\n")
+		b.WriteString("- 必须先读取该 JSON，再开始发言。\n")
+		b.WriteString("- 读取重点：topic、goal、round_focus、round_plan、role_notes。\n\n")
 	}
 
-	b.WriteString("请用以下结构输出（每段尽量精简）：\n")
-	b.WriteString("【观点】\n【依据】\n【风险/反例】\n【建议动作】\n")
+	if board != nil {
+		b.WriteString("[主持人目标（来自黑板 objective）]\n")
+		b.WriteString(fmt.Sprintf("- 轮次：第 %d/%d 轮\n", round, room.MaxRounds))
+		if strings.TrimSpace(board.RoundPlan) != "" {
+			b.WriteString(fmt.Sprintf("- 本轮计划：%s\n", board.RoundPlan))
+		}
+		if strings.TrimSpace(board.RoundFocus) != "" {
+			b.WriteString(fmt.Sprintf("- 本轮焦点：%s\n", board.RoundFocus))
+		}
+		b.WriteString("- 你需要回应至少一条其他角色观点；若暂无观点，先给初始方案并明确待确认点。\n\n")
+	}
+
+	b.WriteString("输出必须分为两段：\n")
+	b.WriteString("A) 群内可读内容（精简）：\n")
+	b.WriteString("【观点】\n【依据】\n【风险/反例】\n【建议动作】\n\n")
+	b.WriteString("B) 黑板回填 JSON（由主持人统一写入黑板，你不要自行写文件）：\n")
+	baseRevision := 0
+	if board != nil {
+		baseRevision = board.Revision
+	}
+	b.WriteString("```json\n")
+	b.WriteString("{\n")
+	b.WriteString("  \"type\": \"blackboard_writeback\",\n")
+	b.WriteString(fmt.Sprintf("  \"room_id\": \"%s\",\n", room.RoomID))
+	b.WriteString(fmt.Sprintf("  \"role\": \"%s\",\n", role.Role))
+	b.WriteString(fmt.Sprintf("  \"round\": %d,\n", round))
+	b.WriteString(fmt.Sprintf("  \"base_revision\": %d,\n", baseRevision))
+	b.WriteString("  \"stance\": \"\",\n")
+	b.WriteString("  \"basis\": \"\",\n")
+	b.WriteString("  \"risk\": \"\",\n")
+	b.WriteString("  \"action\": \"\"\n")
+	b.WriteString("}\n")
+	b.WriteString("```\n")
 	return b.String()
 }
 
-func (e *Engine) buildDebateSummary(room *DebateRoom, transcript []DebateTranscriptEntry) string {
+func flattenPromptForTransport(prompt string) string {
+	prompt = strings.ReplaceAll(prompt, "\r\n", "\n")
+	prompt = strings.ReplaceAll(prompt, "\r", "\n")
+	lines := strings.Split(prompt, "\n")
+	parts := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		parts = append(parts, trimmed)
+	}
+	return strings.Join(parts, " | ")
+}
+
+var sessionKeySafePattern = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
+
+func normalizeSessionKeyPart(raw, fallback string) string {
+	v := strings.TrimSpace(raw)
+	v = sessionKeySafePattern.ReplaceAllString(v, "_")
+	v = strings.Trim(v, "_")
+	if v == "" {
+		return fallback
+	}
+	return v
+}
+
+func (e *Engine) buildDebateSummary(room *DebateRoom, transcript []DebateTranscriptEntry, board *DebateBlackboard) string {
 	var b strings.Builder
 	b.WriteString("请基于以下多角色讨论记录，输出结构化总结。\n")
 	b.WriteString("要求：\n")
@@ -297,6 +371,28 @@ func (e *Engine) buildDebateSummary(room *DebateRoom, transcript []DebateTranscr
 	b.WriteString("3) 给出行动项（owner+deadline+验收标准）。\n")
 	b.WriteString("4) 输出语言：中文。\n\n")
 	b.WriteString(fmt.Sprintf("讨论主题：%s\n", room.Question))
+	if board != nil {
+		if strings.TrimSpace(board.Goal) != "" {
+			b.WriteString(fmt.Sprintf("黑板目标：%s\n", board.Goal))
+		}
+		if len(board.OpenQuestions) > 0 {
+			b.WriteString("黑板待解问题：\n")
+			for i := 0; i < minInt(3, len(board.OpenQuestions)); i++ {
+				b.WriteString(fmt.Sprintf("- %s\n", truncateStr(board.OpenQuestions[i], 100)))
+			}
+		}
+		if len(board.RoleNotes) > 0 {
+			b.WriteString("黑板角色最新观点：\n")
+			for _, rr := range room.Roles {
+				n, ok := board.RoleNotes[rr.Role]
+				if !ok || strings.TrimSpace(n.LatestStance) == "" {
+					continue
+				}
+				b.WriteString(fmt.Sprintf("- [%s] %s\n", emptyAs(rr.DisplayName, rr.Role), truncateStr(n.LatestStance, 120)))
+			}
+		}
+		b.WriteString("\n")
+	}
 	b.WriteString("讨论记录：\n")
 	for _, t := range transcript {
 		b.WriteString(fmt.Sprintf("- [R%d][%s] %s\n", t.Round, t.Role, truncateStr(t.Content, 200)))

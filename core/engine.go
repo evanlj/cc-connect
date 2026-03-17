@@ -20,6 +20,7 @@ const maxPlatformMessageLen = 4000
 const (
 	defaultThinkingMaxLen = 300
 	defaultToolMaxLen     = 500
+	defaultQuietOnStart   = true
 )
 
 // VersionInfo is set by main at startup so that /version works.
@@ -532,7 +533,7 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 	if err != nil {
 		slog.Error("failed to start interactive session", "error", err)
 		if !ok || state == nil {
-			state = &interactiveState{platform: p, replyCtx: replyCtx}
+			state = &interactiveState{platform: p, replyCtx: replyCtx, quiet: defaultQuietOnStart}
 			e.interactiveStates[sessionKey] = state
 			return state
 		}
@@ -553,6 +554,7 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 			agentSession: agentSession,
 			platform:     p,
 			replyCtx:     replyCtx,
+			quiet:        defaultQuietOnStart,
 		}
 		e.interactiveStates[sessionKey] = state
 	}
@@ -1249,19 +1251,57 @@ func inferRepoRootFromInstancesPath(p string) string {
 	return ""
 }
 
+func detectRepoRootFromDir(dir string) string {
+	dir = filepath.Clean(strings.TrimSpace(dir))
+	if dir == "" {
+		return ""
+	}
+	if fi, err := os.Stat(filepath.Join(dir, "instances")); err == nil && fi.IsDir() {
+		return dir
+	}
+	if fi, err := os.Stat(filepath.Join(dir, "mutilbot")); err == nil && fi.IsDir() {
+		return dir
+	}
+	base := strings.ToLower(filepath.Base(dir))
+	if base == "instances" || base == "mutilbot" {
+		parent := filepath.Dir(dir)
+		if parent != dir {
+			return parent
+		}
+	}
+	return ""
+}
+
 func inferRepoRootFromWorkingDir() string {
 	wd, err := os.Getwd()
 	if err != nil {
-		return ""
+		wd = ""
 	}
-	wd = filepath.Clean(wd)
-	if wd == "" {
-		return ""
+	if wd != "" {
+		for dir := filepath.Clean(wd); strings.TrimSpace(dir) != ""; dir = filepath.Dir(dir) {
+			if root := detectRepoRootFromDir(dir); root != "" {
+				return root
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+		}
 	}
-	// If "<wd>/instances" exists, treat wd as repo root.
-	if fi, err := os.Stat(filepath.Join(wd, "instances")); err == nil && fi.IsDir() {
-		return wd
+
+	// Fallback: infer from executable path when cwd cannot reveal repo root.
+	if exe, err := os.Executable(); err == nil && strings.TrimSpace(exe) != "" {
+		for dir := filepath.Clean(filepath.Dir(exe)); strings.TrimSpace(dir) != ""; dir = filepath.Dir(dir) {
+			if root := detectRepoRootFromDir(dir); root != "" {
+				return root
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+		}
 	}
+
 	return ""
 }
 
@@ -1477,7 +1517,7 @@ func (e *Engine) cmdQuiet(p Platform, msg *Message) {
 
 	if !ok || state == nil {
 		// No state yet, create one so the flag persists
-		state = &interactiveState{platform: p, replyCtx: msg.ReplyCtx, quiet: true}
+		state = &interactiveState{platform: p, replyCtx: msg.ReplyCtx, quiet: defaultQuietOnStart}
 		e.interactiveMu.Lock()
 		e.interactiveStates[msg.SessionKey] = state
 		e.interactiveMu.Unlock()

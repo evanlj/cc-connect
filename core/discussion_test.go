@@ -3,6 +3,7 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -113,5 +114,106 @@ func TestDebateStoreSaveGetListAndTranscript(t *testing.T) {
 	}
 	if len(b) == 0 {
 		t.Fatal("transcript file should not be empty")
+	}
+}
+
+func TestDefaultDebateRolesPreferMutilbotLayout(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "mutilbot"), 0o755); err != nil {
+		t.Fatalf("mkdir mutilbot: %v", err)
+	}
+
+	prevWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir temp root: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(prevWD)
+	})
+
+	roles := defaultDebateRoles()
+	if len(roles) != 5 {
+		t.Fatalf("roles len mismatch: %d", len(roles))
+	}
+	if roles[0].Instance != "instance-mutilbot1" {
+		t.Fatalf("expected mutilbot mapping, got %q", roles[0].Instance)
+	}
+	socketPath := filepath.ToSlash(roles[0].SocketPath)
+	if !strings.Contains(socketPath, "/mutilbot/instance-mutilbot1/data/run/api.sock") {
+		t.Fatalf("unexpected socket path: %q", roles[0].SocketPath)
+	}
+}
+
+func TestDefaultDebateRolesFallbackLegacyLayout(t *testing.T) {
+	root := t.TempDir()
+	prevWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir temp root: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(prevWD)
+	})
+
+	roles := defaultDebateRoles()
+	if len(roles) != 5 {
+		t.Fatalf("roles len mismatch: %d", len(roles))
+	}
+	if roles[0].Instance != "instance-a" {
+		t.Fatalf("expected legacy mapping, got %q", roles[0].Instance)
+	}
+}
+
+func TestInferRepoRootFromWorkingDirWithMutilbotSubDirs(t *testing.T) {
+	root := t.TempDir()
+	mutilbotRoot := filepath.Join(root, "mutilbot")
+	instanceDir := filepath.Join(mutilbotRoot, "instance-mutilbot1")
+	if err := os.MkdirAll(instanceDir, 0o755); err != nil {
+		t.Fatalf("mkdir instance dir: %v", err)
+	}
+
+	prevWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(prevWD)
+	})
+
+	if err := os.Chdir(mutilbotRoot); err != nil {
+		t.Fatalf("chdir mutilbot root: %v", err)
+	}
+	if got := inferRepoRootFromWorkingDir(); filepath.Clean(got) != filepath.Clean(root) {
+		t.Fatalf("repo root mismatch from mutilbot root: got %q want %q", got, root)
+	}
+
+	if err := os.Chdir(instanceDir); err != nil {
+		t.Fatalf("chdir mutilbot instance: %v", err)
+	}
+	if got := inferRepoRootFromWorkingDir(); filepath.Clean(got) != filepath.Clean(root) {
+		t.Fatalf("repo root mismatch from mutilbot instance: got %q want %q", got, root)
+	}
+}
+
+func TestNormalizeDebateQuestionStripMentions(t *testing.T) {
+	in := "请讨论：如何把需求拆成可并行执行的任务 @Jarvis @_user_1"
+	got := normalizeDebateQuestion(in)
+	want := "请讨论：如何把需求拆成可并行执行的任务"
+	if got != want {
+		t.Fatalf("normalize question mismatch:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestNormalizeDebateQuestionStripFeishuAtTag(t *testing.T) {
+	in := "请讨论：如何把需求拆成可并行执行的任务 <at user_id=\"ou_xxx\">Jarvis</at>"
+	got := normalizeDebateQuestion(in)
+	want := "请讨论：如何把需求拆成可并行执行的任务"
+	if got != want {
+		t.Fatalf("normalize feishu at mismatch:\n got: %q\nwant: %q", got, want)
 	}
 }

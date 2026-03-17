@@ -31,6 +31,8 @@ func (e *Engine) cmdDebate(p Platform, msg *Message, args []string) {
 		e.cmdDebateStart(p, msg, args[1:])
 	case "status":
 		e.cmdDebateStatus(p, msg, args[1:])
+	case "board":
+		e.cmdDebateBoard(p, msg, args[1:])
 	case "stop":
 		e.cmdDebateStop(p, msg, args[1:])
 	case "list":
@@ -75,6 +77,10 @@ func (e *Engine) cmdDebateStart(p Platform, msg *Message, args []string) {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Failed to create debate room: %v", err))
 		}
 		return
+	}
+	if _, err := e.debateStore.LoadOrInitBlackboard(room); err != nil {
+		// Non-fatal: debate can still run without board persistence.
+		// Keep this best-effort and continue.
 	}
 
 	// M1 skeleton: create room + initial transcript line.
@@ -221,6 +227,63 @@ func (e *Engine) cmdDebateStop(p Platform, msg *Message, args []string) {
 	} else {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ Debate room stopped: `%s`", room.RoomID))
 	}
+}
+
+func (e *Engine) cmdDebateBoard(p Platform, msg *Message, args []string) {
+	isZh := e.i18n.CurrentLang() == LangChinese
+
+	var (
+		room *DebateRoom
+		err  error
+	)
+	if len(args) > 0 {
+		room, err = e.debateStore.GetRoom(args[0])
+		if err != nil {
+			if os.IsNotExist(err) {
+				if isZh {
+					e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ 未找到房间：`%s`", args[0]))
+				} else {
+					e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Room not found: `%s`", args[0]))
+				}
+				return
+			}
+			if isZh {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ 读取房间失败：%v", err))
+			} else {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Failed to read room: %v", err))
+			}
+			return
+		}
+	} else {
+		room, err = e.latestRoomByOwner(msg.SessionKey)
+		if err != nil {
+			if isZh {
+				e.reply(p, msg.ReplyCtx, "暂无讨论房间。先用 `/debate start ...` 创建。")
+			} else {
+				e.reply(p, msg.ReplyCtx, "No debate room found. Create one with `/debate start ...` first.")
+			}
+			return
+		}
+	}
+
+	board, err := e.debateStore.LoadOrInitBlackboard(room)
+	if err != nil {
+		if isZh {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ 读取黑板失败：%v", err))
+		} else {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Failed to load blackboard: %v", err))
+		}
+		return
+	}
+	body := formatDebateBlackboard(board, room, isZh)
+	if path := strings.TrimSpace(e.debateStore.BlackboardFilePath(room.RoomID)); path != "" {
+		if isZh {
+			body += fmt.Sprintf("\n\n- 黑板文件: `%s`", path)
+		} else {
+			body += fmt.Sprintf("\n\n- blackboard_file: `%s`", path)
+		}
+	}
+	e.reply(p, msg.ReplyCtx, body)
 }
 
 func (e *Engine) cmdDebateList(p Platform, msg *Message) {
@@ -374,12 +437,109 @@ func (e *Engine) debateUsage(isZh bool) string {
 		return "用法：\n" +
 			"- `/debate start --preset tianji-five --rounds 3 --speaking-policy host-decide <问题>`\n" +
 			"- `/debate status [room_id]`\n" +
+			"- `/debate board [room_id]`\n" +
 			"- `/debate stop <room_id>`\n" +
 			"- `/debate list`"
 	}
 	return "Usage:\n" +
 		"- `/debate start --preset tianji-five --rounds 3 --speaking-policy host-decide <question>`\n" +
 		"- `/debate status [room_id]`\n" +
+		"- `/debate board [room_id]`\n" +
 		"- `/debate stop <room_id>`\n" +
 		"- `/debate list`"
+}
+
+func formatDebateBlackboard(board *DebateBlackboard, room *DebateRoom, isZh bool) string {
+	if board == nil {
+		if isZh {
+			return "❌ 黑板为空"
+		}
+		return "❌ blackboard is nil"
+	}
+
+	var b strings.Builder
+	if isZh {
+		b.WriteString("🧠 讨论黑板\n\n")
+		b.WriteString(fmt.Sprintf("- room_id: `%s`\n", board.RoomID))
+		b.WriteString(fmt.Sprintf("- revision: `%d`\n", board.Revision))
+		b.WriteString(fmt.Sprintf("- 主题: %s\n", emptyAs(board.Topic, room.Question)))
+		if strings.TrimSpace(board.Goal) != "" {
+			b.WriteString(fmt.Sprintf("- 目标: %s\n", board.Goal))
+		}
+		b.WriteString(fmt.Sprintf("- 轮次: `%d/%d`\n", board.Round, board.MaxRounds))
+		if strings.TrimSpace(board.RoundPlan) != "" {
+			b.WriteString(fmt.Sprintf("- 本轮计划: %s\n", board.RoundPlan))
+		}
+		if strings.TrimSpace(board.RoundFocus) != "" {
+			b.WriteString(fmt.Sprintf("- 本轮焦点: %s\n", board.RoundFocus))
+		}
+		if len(board.OpenQuestions) > 0 {
+			b.WriteString("- 待解问题:\n")
+			for i := 0; i < minInt(3, len(board.OpenQuestions)); i++ {
+				b.WriteString(fmt.Sprintf("  - %s\n", truncateStr(board.OpenQuestions[i], 110)))
+			}
+		}
+		b.WriteString("\n- 角色最新观点:\n")
+	} else {
+		b.WriteString("🧠 Debate blackboard\n\n")
+		b.WriteString(fmt.Sprintf("- room_id: `%s`\n", board.RoomID))
+		b.WriteString(fmt.Sprintf("- revision: `%d`\n", board.Revision))
+		b.WriteString(fmt.Sprintf("- topic: %s\n", emptyAs(board.Topic, room.Question)))
+		if strings.TrimSpace(board.Goal) != "" {
+			b.WriteString(fmt.Sprintf("- goal: %s\n", board.Goal))
+		}
+		b.WriteString(fmt.Sprintf("- round: `%d/%d`\n", board.Round, board.MaxRounds))
+		if strings.TrimSpace(board.RoundPlan) != "" {
+			b.WriteString(fmt.Sprintf("- round_plan: %s\n", board.RoundPlan))
+		}
+		if strings.TrimSpace(board.RoundFocus) != "" {
+			b.WriteString(fmt.Sprintf("- round_focus: %s\n", board.RoundFocus))
+		}
+		if len(board.OpenQuestions) > 0 {
+			b.WriteString("- open_questions:\n")
+			for i := 0; i < minInt(3, len(board.OpenQuestions)); i++ {
+				b.WriteString(fmt.Sprintf("  - %s\n", truncateStr(board.OpenQuestions[i], 110)))
+			}
+		}
+		b.WriteString("\n- latest role notes:\n")
+	}
+
+	roleOrder := make([]DebateRole, 0, len(room.Roles))
+	for _, r := range room.Roles {
+		if strings.EqualFold(r.Role, "jarvis") {
+			continue
+		}
+		roleOrder = append(roleOrder, r)
+	}
+	for _, r := range roleOrder {
+		n, ok := board.RoleNotes[r.Role]
+		if !ok {
+			b.WriteString(fmt.Sprintf("  - %s: （暂无）\n", emptyAs(r.DisplayName, r.Role)))
+			continue
+		}
+		b.WriteString(fmt.Sprintf("  - %s: %s\n", emptyAs(r.DisplayName, r.Role), truncateStr(emptyAs(n.LatestStance, n.LastMessage), 110)))
+		if strings.TrimSpace(n.LatestAction) != "" {
+			if isZh {
+				b.WriteString(fmt.Sprintf("      action: %s\n", truncateStr(n.LatestAction, 110)))
+			} else {
+				b.WriteString(fmt.Sprintf("      action: %s\n", truncateStr(n.LatestAction, 110)))
+			}
+		}
+	}
+
+	if len(board.HistoryDigest) > 0 {
+		if isZh {
+			b.WriteString("\n- 最近沉淀:\n")
+		} else {
+			b.WriteString("\n- recent digest:\n")
+		}
+		start := 0
+		if len(board.HistoryDigest) > 4 {
+			start = len(board.HistoryDigest) - 4
+		}
+		for i := start; i < len(board.HistoryDigest); i++ {
+			b.WriteString(fmt.Sprintf("  - %s\n", truncateStr(board.HistoryDigest[i], 120)))
+		}
+	}
+	return strings.TrimSpace(b.String())
 }

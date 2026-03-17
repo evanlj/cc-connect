@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -227,6 +228,58 @@ func (s *DebateStore) transcriptPath(roomID string) string {
 }
 
 func defaultDebateRoles() []DebateRole {
+	// Preferred mapping for this branch/user setup:
+	// D:/ai-github/cc-connect/mutilbot/instance-mutilbot{1..5}
+	//
+	// If mutilbot directories are not present, fallback to legacy instance-a~e.
+	if repoRoot := inferRepoRootFromWorkingDir(); repoRoot != "" {
+		mutilbotRoot := filepath.Join(repoRoot, "mutilbot")
+		if fi, err := os.Stat(mutilbotRoot); err == nil && fi.IsDir() {
+			return []DebateRole{
+				{
+					Role:        "jarvis",
+					DisplayName: "Jarvis",
+					Instance:    "instance-mutilbot1",
+					Project:     "instance-mutilbot1-project-jarvis",
+					SocketPath:  filepath.Join(mutilbotRoot, "instance-mutilbot1", "data", "run", "api.sock"),
+					SpeakMode:   "self",
+				},
+				{
+					Role:        "jianzhu",
+					DisplayName: "剑主",
+					Instance:    "instance-mutilbot2",
+					Project:     "instance-mutilbot2-project-jianzhu",
+					SocketPath:  filepath.Join(mutilbotRoot, "instance-mutilbot2", "data", "run", "api.sock"),
+					SpeakMode:   "self",
+				},
+				{
+					Role:        "wendan",
+					DisplayName: "文胆",
+					Instance:    "instance-mutilbot3",
+					Project:     "instance-mutilbot3-project-wendan",
+					SocketPath:  filepath.Join(mutilbotRoot, "instance-mutilbot3", "data", "run", "api.sock"),
+					SpeakMode:   "self",
+				},
+				{
+					Role:        "xingzou",
+					DisplayName: "行走",
+					Instance:    "instance-mutilbot4",
+					Project:     "instance-mutilbot4-project-xingzou",
+					SocketPath:  filepath.Join(mutilbotRoot, "instance-mutilbot4", "data", "run", "api.sock"),
+					SpeakMode:   "self",
+				},
+				{
+					Role:        "zhanggui",
+					DisplayName: "掌柜",
+					Instance:    "instance-mutilbot5",
+					Project:     "instance-mutilbot5-project-zhanggui",
+					SocketPath:  filepath.Join(mutilbotRoot, "instance-mutilbot5", "data", "run", "api.sock"),
+					SpeakMode:   "self",
+				},
+			}
+		}
+	}
+
 	return []DebateRole{
 		{Role: "jarvis", DisplayName: "Jarvis", Instance: "instance-a", Project: "instance-a", SpeakMode: "self"},
 		{Role: "jianzhu", DisplayName: "剑主", Instance: "instance-b", Project: "instance-b", SpeakMode: "self"},
@@ -270,7 +323,7 @@ func NormalizeDebateStartOptions(in DebateStartOptions) DebateStartOptions {
 	if out.MaxRounds > MaxDebateMaxRounds {
 		out.MaxRounds = MaxDebateMaxRounds
 	}
-	out.Question = strings.TrimSpace(out.Question)
+	out.Question = normalizeDebateQuestion(out.Question)
 	return out
 }
 
@@ -306,4 +359,37 @@ func extractGroupChatID(sessionKey string) string {
 		return parts[1]
 	}
 	return ""
+}
+
+var debateAtTagPattern = regexp.MustCompile(`(?is)<at\b[^>]*>.*?</at>`)
+
+func normalizeDebateQuestion(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	// Remove Feishu <at ...>...</at> mentions if they appear in text payload.
+	s = debateAtTagPattern.ReplaceAllString(s, " ")
+
+	fields := strings.Fields(s)
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if isMentionToken(f) {
+			continue
+		}
+		out = append(out, f)
+	}
+	return strings.TrimSpace(strings.Join(out, " "))
+}
+
+func isMentionToken(token string) bool {
+	t := strings.TrimSpace(token)
+	if t == "" {
+		return false
+	}
+	t = strings.Trim(t, "，,。.!?;；:：()[]{}<>《》\"'`“”‘’")
+	if len(t) <= 1 {
+		return false
+	}
+	return strings.HasPrefix(t, "@")
 }

@@ -166,3 +166,22 @@ func TestEngineSendBySessionKey(t *testing.T) {
 		t.Fatalf("sent content mismatch: %q", platform.sent[0])
 	}
 }
+
+func TestInteractiveStateDefaultQuietOnStart(t *testing.T) {
+	platform := &stubPlatform{name: "feishu"}
+	engine := NewEngine("quiet-default-test", &stubAgent{session: newStubAgentSession(make(chan Event))}, []Platform{platform}, "", LangEnglish)
+	s := engine.sessions.GetOrCreateActive("feishu:oc_chat:ou_user")
+
+	state := engine.getOrCreateInteractiveState("feishu:oc_chat:ou_user", platform, "ctx", s)
+	if state == nil {
+		t.Fatal("state should not be nil")
+	}
+
+	state.mu.Lock()
+	quiet := state.quiet
+	state.mu.Unlock()
+
+	if !quiet {
+		t.Fatal("expected quiet mode ON by default for new interactive session")
+	}
+}
