@@ -29,6 +29,10 @@ func (e *Engine) cmdDebate(p Platform, msg *Message, args []string) {
 	switch sub {
 	case "start":
 		e.cmdDebateStart(p, msg, args[1:])
+	case "answer":
+		e.cmdDebateAnswer(p, msg, args[1:])
+	case "continue":
+		e.cmdDebateContinue(p, msg, args[1:])
 	case "status":
 		e.cmdDebateStatus(p, msg, args[1:])
 	case "board":
@@ -103,18 +107,166 @@ func (e *Engine) cmdDebateStart(p Platform, msg *Message, args []string) {
 
 	if isZh {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(
-			"✅ 已创建并启动讨论：`%s`\n- 预设：`%s`\n- 轮次上限：`%d`\n- 发言策略：`%s`\n- 主题：%s\n\n可用命令：`/debate status %s`、`/debate stop %s`",
-			room.RoomID, room.Preset, room.MaxRounds, room.SpeakingPolicy, room.Question,
+			"✅ 已创建并启动讨论：`%s`\n- 模式：`%s`\n- 预设：`%s`\n- 轮次上限：`%d`\n- 发言策略：`%s`\n- 主题：%s\n\n可用命令：`/debate status %s`、`/debate board %s`、`/debate stop %s`",
+			room.RoomID, room.Mode, room.Preset, room.MaxRounds, room.SpeakingPolicy, room.Question,
+			room.RoomID,
 			room.RoomID, room.RoomID,
 		))
 		return
 	}
 
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(
-		"✅ Debate created and started: `%s`\n- preset: `%s`\n- max_rounds: `%d`\n- speaking_policy: `%s`\n- topic: %s\n\nCommands: `/debate status %s`, `/debate stop %s`",
-		room.RoomID, room.Preset, room.MaxRounds, room.SpeakingPolicy, room.Question,
+		"✅ Debate created and started: `%s`\n- mode: `%s`\n- preset: `%s`\n- max_rounds: `%d`\n- speaking_policy: `%s`\n- topic: %s\n\nCommands: `/debate status %s`, `/debate board %s`, `/debate stop %s`",
+		room.RoomID, room.Mode, room.Preset, room.MaxRounds, room.SpeakingPolicy, room.Question,
+		room.RoomID,
 		room.RoomID, room.RoomID,
 	))
+}
+
+func (e *Engine) cmdDebateAnswer(p Platform, msg *Message, args []string) {
+	isZh := e.i18n.CurrentLang() == LangChinese
+	if len(args) < 2 {
+		if isZh {
+			e.reply(p, msg.ReplyCtx, "用法：`/debate answer <room_id> <你的补充信息>`")
+		} else {
+			e.reply(p, msg.ReplyCtx, "Usage: `/debate answer <room_id> <your clarification>`")
+		}
+		return
+	}
+
+	roomID := strings.TrimSpace(args[0])
+	answer := strings.TrimSpace(strings.Join(args[1:], " "))
+	if roomID == "" || answer == "" {
+		if isZh {
+			e.reply(p, msg.ReplyCtx, "❌ 参数不能为空：room_id 与补充信息都需要。")
+		} else {
+			e.reply(p, msg.ReplyCtx, "❌ Invalid args: room_id and clarification are required.")
+		}
+		return
+	}
+
+	room, err := e.debateStore.GetRoom(roomID)
+	if err != nil {
+		if os.IsNotExist(err) {
+			if isZh {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ 未找到房间：`%s`", roomID))
+			} else {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Room not found: `%s`", roomID))
+			}
+			return
+		}
+		if isZh {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ 读取房间失败：%v", err))
+		} else {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Failed to read room: %v", err))
+		}
+		return
+	}
+	if !strings.EqualFold(room.Mode, DebateModeConsensus) {
+		if isZh {
+			e.reply(p, msg.ReplyCtx, "❌ 当前房间不是 consensus 模式，无需 answer。")
+		} else {
+			e.reply(p, msg.ReplyCtx, "❌ This room is not in consensus mode; answer is not required.")
+		}
+		return
+	}
+
+	room.RefinedQuestion = buildRefinedQuestion(room.Question, answer)
+	room.Status = DebateStatusRunning
+	room.Phase = "host_seed"
+	room.StopReason = ""
+	if err := e.debateStore.SaveRoom(room); err != nil {
+		if isZh {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ 更新房间失败：%v", err))
+		} else {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Failed to update room: %v", err))
+		}
+		return
+	}
+
+	_ = e.debateStore.AppendTranscript(room.RoomID, DebateTranscriptEntry{
+		Round:    0,
+		Speaker:  "user",
+		Role:     "user",
+		PostedBy: "user",
+		Content:  "clarification_answer: " + answer,
+	})
+
+	if err := e.startDebateRunner(room.RoomID); err != nil {
+		if isZh {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ 已记录补充，但恢复讨论失败：%v", err))
+		} else {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Clarification recorded, but failed to resume debate: %v", err))
+		}
+		return
+	}
+
+	if isZh {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ 已记录补充并恢复讨论：`%s`", room.RoomID))
+	} else {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ Clarification saved and debate resumed: `%s`", room.RoomID))
+	}
+}
+
+func (e *Engine) cmdDebateContinue(p Platform, msg *Message, args []string) {
+	isZh := e.i18n.CurrentLang() == LangChinese
+	if len(args) == 0 {
+		if isZh {
+			e.reply(p, msg.ReplyCtx, "用法：`/debate continue <room_id>`")
+		} else {
+			e.reply(p, msg.ReplyCtx, "Usage: `/debate continue <room_id>`")
+		}
+		return
+	}
+	roomID := strings.TrimSpace(args[0])
+	room, err := e.debateStore.GetRoom(roomID)
+	if err != nil {
+		if os.IsNotExist(err) {
+			if isZh {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ 未找到房间：`%s`", roomID))
+			} else {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Room not found: `%s`", roomID))
+			}
+			return
+		}
+		if isZh {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ 读取房间失败：%v", err))
+		} else {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Failed to read room: %v", err))
+		}
+		return
+	}
+	if e.isDebateRunnerActive(room.RoomID) {
+		if isZh {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("ℹ️ 房间 `%s` 已在运行。", room.RoomID))
+		} else {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("ℹ️ Room `%s` is already running.", room.RoomID))
+		}
+		return
+	}
+	room.Status = DebateStatusRunning
+	room.StopReason = ""
+	if err := e.debateStore.SaveRoom(room); err != nil {
+		if isZh {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ 更新房间失败：%v", err))
+		} else {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Failed to update room: %v", err))
+		}
+		return
+	}
+	if err := e.startDebateRunner(room.RoomID); err != nil {
+		if isZh {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ 恢复讨论失败：%v", err))
+		} else {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Failed to resume debate: %v", err))
+		}
+		return
+	}
+	if isZh {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ 已恢复讨论：`%s`", room.RoomID))
+	} else {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ Debate resumed: `%s`", room.RoomID))
+	}
 }
 
 func (e *Engine) cmdDebateStatus(p Platform, msg *Message, args []string) {
@@ -345,6 +497,7 @@ func parseDebateStartOptions(args []string) (DebateStartOptions, error) {
 		Preset:         DefaultDebatePreset,
 		MaxRounds:      DefaultDebateMaxRounds,
 		SpeakingPolicy: DefaultSpeakingPolicy,
+		Mode:           DefaultDebateMode,
 	}
 
 	var questionParts []string
@@ -383,6 +536,8 @@ func parseDebateStartOptions(args []string) (DebateStartOptions, error) {
 			opts.MaxRounds = n
 		case "--speaking-policy":
 			opts.SpeakingPolicy = val
+		case "--mode":
+			opts.Mode = val
 		default:
 			return opts, fmt.Errorf("unknown option %s", key)
 		}
@@ -403,9 +558,12 @@ func formatDebateRoomStatus(room *DebateRoom, isZh bool) string {
 
 	if isZh {
 		return fmt.Sprintf(
-			"🧭 讨论房间状态\n\n- room_id: `%s`\n- status: `%s`\n- preset: `%s`\n- rounds: `%d`\n- current_round: `%d`\n- speaking_policy: `%s`\n- owner_session: `%s`\n- created_at: `%s`\n- updated_at: `%s`\n- topic: %s",
+			"🧭 讨论房间状态\n\n- room_id: `%s`\n- status: `%s`\n- mode: `%s`\n- phase: `%s`\n- iteration: `%d`\n- preset: `%s`\n- rounds: `%d`\n- current_round: `%d`\n- speaking_policy: `%s`\n- owner_session: `%s`\n- created_at: `%s`\n- updated_at: `%s`\n- topic: %s",
 			room.RoomID,
 			room.Status,
+			emptyAs(room.Mode, DebateModeClassic),
+			emptyAs(room.Phase, "-"),
+			room.Iteration,
 			room.Preset,
 			room.MaxRounds,
 			room.CurrentRound,
@@ -418,9 +576,12 @@ func formatDebateRoomStatus(room *DebateRoom, isZh bool) string {
 	}
 
 	return fmt.Sprintf(
-		"🧭 Debate room status\n\n- room_id: `%s`\n- status: `%s`\n- preset: `%s`\n- rounds: `%d`\n- current_round: `%d`\n- speaking_policy: `%s`\n- owner_session: `%s`\n- created_at: `%s`\n- updated_at: `%s`\n- topic: %s",
+		"🧭 Debate room status\n\n- room_id: `%s`\n- status: `%s`\n- mode: `%s`\n- phase: `%s`\n- iteration: `%d`\n- preset: `%s`\n- rounds: `%d`\n- current_round: `%d`\n- speaking_policy: `%s`\n- owner_session: `%s`\n- created_at: `%s`\n- updated_at: `%s`\n- topic: %s",
 		room.RoomID,
 		room.Status,
+		emptyAs(room.Mode, DebateModeClassic),
+		emptyAs(room.Phase, "-"),
+		room.Iteration,
 		room.Preset,
 		room.MaxRounds,
 		room.CurrentRound,
@@ -435,18 +596,36 @@ func formatDebateRoomStatus(room *DebateRoom, isZh bool) string {
 func (e *Engine) debateUsage(isZh bool) string {
 	if isZh {
 		return "用法：\n" +
-			"- `/debate start --preset tianji-five --rounds 3 --speaking-policy host-decide <问题>`\n" +
+			"- `/debate start --mode classic --preset tianji-five --rounds 3 --speaking-policy host-decide <问题>`（host-decide 终轮自动全员发言）\n" +
+			"- `/debate start --mode consensus --rounds 4 <问题>`\n" +
+			"- `/debate answer <room_id> <补充信息>`（consensus 模式澄清阶段使用）\n" +
+			"- `/debate continue <room_id>`\n" +
 			"- `/debate status [room_id]`\n" +
 			"- `/debate board [room_id]`\n" +
 			"- `/debate stop <room_id>`\n" +
 			"- `/debate list`"
 	}
 	return "Usage:\n" +
-		"- `/debate start --preset tianji-five --rounds 3 --speaking-policy host-decide <question>`\n" +
+		"- `/debate start --mode classic --preset tianji-five --rounds 3 --speaking-policy host-decide <question>` (host-decide auto includes all workers in final round)\n" +
+		"- `/debate start --mode consensus --rounds 4 <question>`\n" +
+		"- `/debate answer <room_id> <clarification>` (for consensus clarify phase)\n" +
+		"- `/debate continue <room_id>`\n" +
 		"- `/debate status [room_id]`\n" +
 		"- `/debate board [room_id]`\n" +
 		"- `/debate stop <room_id>`\n" +
 		"- `/debate list`"
+}
+
+func buildRefinedQuestion(baseQuestion, answer string) string {
+	baseQuestion = strings.TrimSpace(baseQuestion)
+	answer = strings.TrimSpace(answer)
+	if answer == "" {
+		return baseQuestion
+	}
+	if baseQuestion == "" {
+		return answer
+	}
+	return fmt.Sprintf("%s\n\n用户补充：%s", baseQuestion, answer)
 }
 
 func formatDebateBlackboard(board *DebateBlackboard, room *DebateRoom, isZh bool) string {

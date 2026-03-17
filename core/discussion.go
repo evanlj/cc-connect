@@ -19,10 +19,17 @@ const (
 	DebateStatusCompleted  = "completed"
 	DebateStatusStopped    = "stopped"
 	DebateStatusFailed     = "failed"
+	DebateStatusWaiting    = "waiting_input"
 	DefaultDebatePreset    = "tianji-five"
 	DefaultSpeakingPolicy  = "host-decide"
 	DefaultDebateMaxRounds = 3
+	DefaultDebateMode      = DebateModeClassic
 	MaxDebateMaxRounds     = 8
+)
+
+const (
+	DebateModeClassic   = "classic"
+	DebateModeConsensus = "consensus"
 )
 
 type DebateRole struct {
@@ -42,10 +49,14 @@ type DebateRoom struct {
 	OwnerSessionKey string       `json:"owner_session_key"`
 	GroupChatID     string       `json:"group_chat_id,omitempty"`
 	Question        string       `json:"question"`
+	RefinedQuestion string       `json:"refined_question,omitempty"`
 	Preset          string       `json:"preset"`
 	MaxRounds       int          `json:"max_rounds"`
 	CurrentRound    int          `json:"current_round"`
 	SpeakingPolicy  string       `json:"speaking_policy"`
+	Mode            string       `json:"mode,omitempty"`
+	Phase           string       `json:"phase,omitempty"`
+	Iteration       int          `json:"iteration,omitempty"`
 	Roles           []DebateRole `json:"roles"`
 	StopReason      string       `json:"stop_reason,omitempty"`
 }
@@ -64,6 +75,7 @@ type DebateStartOptions struct {
 	Preset         string
 	MaxRounds      int
 	SpeakingPolicy string
+	Mode           string
 	Question       string
 }
 
@@ -211,6 +223,37 @@ func (s *DebateStore) AppendTranscript(roomID string, item DebateTranscriptEntry
 	return nil
 }
 
+func (s *DebateStore) LoadTranscript(roomID string) ([]DebateTranscriptEntry, error) {
+	if !s.Enabled() {
+		return nil, fmt.Errorf("debate store is disabled")
+	}
+	roomID = strings.TrimSpace(roomID)
+	if roomID == "" {
+		return nil, fmt.Errorf("room_id is required")
+	}
+	b, err := os.ReadFile(s.transcriptPath(roomID))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []DebateTranscriptEntry{}, nil
+		}
+		return nil, err
+	}
+	lines := strings.Split(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n")
+	out := make([]DebateTranscriptEntry, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var item DebateTranscriptEntry
+		if err := json.Unmarshal([]byte(line), &item); err != nil {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out, nil
+}
+
 func (s *DebateStore) roomsDir() string {
 	return filepath.Join(s.rootDir, "rooms")
 }
@@ -303,6 +346,9 @@ func NewDebateRoom(ownerSessionKey string, opts DebateStartOptions, now time.Tim
 		MaxRounds:       normalized.MaxRounds,
 		CurrentRound:    0,
 		SpeakingPolicy:  normalized.SpeakingPolicy,
+		Mode:            normalized.Mode,
+		Phase:           "init",
+		Iteration:       0,
 		Roles:           defaultDebateRoles(),
 	}
 }
@@ -316,6 +362,13 @@ func NormalizeDebateStartOptions(in DebateStartOptions) DebateStartOptions {
 	out.SpeakingPolicy = strings.TrimSpace(out.SpeakingPolicy)
 	if out.SpeakingPolicy == "" {
 		out.SpeakingPolicy = DefaultSpeakingPolicy
+	}
+	out.Mode = strings.ToLower(strings.TrimSpace(out.Mode))
+	if out.Mode == "" {
+		out.Mode = DefaultDebateMode
+	}
+	if out.Mode != DebateModeClassic && out.Mode != DebateModeConsensus {
+		out.Mode = DefaultDebateMode
 	}
 	if out.MaxRounds <= 0 {
 		out.MaxRounds = DefaultDebateMaxRounds
@@ -333,6 +386,13 @@ func ValidateDebateStartOptions(in DebateStartOptions) error {
 	}
 	if in.MaxRounds < 1 || in.MaxRounds > MaxDebateMaxRounds {
 		return fmt.Errorf("max_rounds must be in [1,%d]", MaxDebateMaxRounds)
+	}
+	mode := strings.ToLower(strings.TrimSpace(in.Mode))
+	if mode == "" {
+		mode = DefaultDebateMode
+	}
+	if mode != DebateModeClassic && mode != DebateModeConsensus {
+		return fmt.Errorf("mode must be one of [%s,%s]", DebateModeClassic, DebateModeConsensus)
 	}
 	return nil
 }

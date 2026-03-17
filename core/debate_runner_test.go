@@ -23,6 +23,11 @@ func TestSelectDebateSpeakers(t *testing.T) {
 	if len(got2) < 2 {
 		t.Fatalf("cover-all-by-end should prioritize uncovered roles: %+v", got2)
 	}
+
+	gotFinal := selectDebateSpeakers("host-decide", 3, workers, spoken, 3)
+	if len(gotFinal) != len(workers) {
+		t.Fatalf("final round should include all workers, got=%d want=%d", len(gotFinal), len(workers))
+	}
 }
 
 func TestBuildRoleSessionKey(t *testing.T) {
@@ -127,6 +132,17 @@ func TestDebateSummaryNeedsRepairGoodSummary(t *testing.T) {
 	need, issues := debateSummaryNeedsRepair(okSummary)
 	if need {
 		t.Fatalf("good summary should not require repair, issues=%v", issues)
+	}
+}
+
+func TestDebateSummaryNeedsRepairPendingOwner(t *testing.T) {
+	bad := "最终结论：先做MVP。\n主要风险：范围失控。\n行动项：\n- owner: 待定, deadline: 2026-03-19, 验收标准: 输出RFC。"
+	need, issues := debateSummaryNeedsRepair(bad)
+	if !need {
+		t.Fatalf("pending owner summary should require repair, issues=%v", issues)
+	}
+	if len(issues) == 0 {
+		t.Fatal("issues should not be empty")
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 func TestParseDebateStartOptions(t *testing.T) {
 	t.Run("ok", func(t *testing.T) {
 		opts, err := parseDebateStartOptions([]string{
+			"--mode", "consensus",
 			"--preset", "tianji-five",
 			"--rounds", "4",
 			"--speaking-policy", "host-decide",
@@ -23,6 +24,9 @@ func TestParseDebateStartOptions(t *testing.T) {
 		}
 		if opts.Preset != "tianji-five" {
 			t.Fatalf("preset mismatch: %q", opts.Preset)
+		}
+		if opts.Mode != "consensus" {
+			t.Fatalf("mode mismatch: %q", opts.Mode)
 		}
 		if opts.MaxRounds != 4 {
 			t.Fatalf("max rounds mismatch: %d", opts.MaxRounds)
@@ -52,6 +56,17 @@ func TestParseDebateStartOptions(t *testing.T) {
 		}
 		if err := ValidateDebateStartOptions(opts); err == nil {
 			t.Fatal("expected validation error, got nil")
+		}
+	})
+
+	t.Run("invalid mode", func(t *testing.T) {
+		opts := DebateStartOptions{
+			Mode:      "xxx",
+			Question:  "q",
+			MaxRounds: 3,
+		}
+		if err := ValidateDebateStartOptions(opts); err == nil {
+			t.Fatal("expected invalid mode error, got nil")
 		}
 	})
 }
@@ -114,6 +129,17 @@ func TestDebateStoreSaveGetListAndTranscript(t *testing.T) {
 	}
 	if len(b) == 0 {
 		t.Fatal("transcript file should not be empty")
+	}
+
+	loaded, err := store.LoadTranscript(room.RoomID)
+	if err != nil {
+		t.Fatalf("load transcript: %v", err)
+	}
+	if len(loaded) == 0 {
+		t.Fatal("loaded transcript should not be empty")
+	}
+	if loaded[0].Role != "jianzhu" {
+		t.Fatalf("loaded transcript role mismatch: %q", loaded[0].Role)
 	}
 }
 

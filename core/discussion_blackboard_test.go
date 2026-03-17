@@ -127,3 +127,14 @@ func TestExtractRoleContributionWithWritebackJSON(t *testing.T) {
 		t.Fatalf("display reply should strip writeback json block, got %q", c.DisplayReply)
 	}
 }
+
+func TestTruncateStrKeepsUTF8Boundary(t *testing.T) {
+	in := "这是一个用于验证UTF-8截断安全性的测试字符串"
+	got := truncateStr(in, 8)
+	if strings.Contains(got, "\uFFFD") {
+		t.Fatalf("truncate should not produce replacement rune, got=%q", got)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("truncate should append ellipsis, got=%q", got)
+	}
+}

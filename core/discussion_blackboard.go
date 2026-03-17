@@ -30,7 +30,11 @@ type DebateRoleNote struct {
 // 3) provide a stable context snapshot for the next speaker prompt.
 type DebateBlackboard struct {
 	RoomID          string                    `json:"room_id"`
+	Mode            string                    `json:"mode,omitempty"`
+	Phase           string                    `json:"phase,omitempty"`
+	Iteration       int                       `json:"iteration,omitempty"`
 	Topic           string                    `json:"topic"`
+	RefinedTopic    string                    `json:"refined_topic,omitempty"`
 	Goal            string                    `json:"goal"`
 	Constraints     []string                  `json:"constraints,omitempty"`
 	ExpectedOutput  []string                  `json:"expected_output,omitempty"`
@@ -39,6 +43,8 @@ type DebateBlackboard struct {
 	RoundPlan       string                    `json:"round_plan,omitempty"`
 	RoundFocus      string                    `json:"round_focus,omitempty"`
 	OpenQuestions   []string                  `json:"open_questions,omitempty"`
+	ConsensusPoints []string                  `json:"consensus_points,omitempty"`
+	Unresolved      []string                  `json:"unresolved,omitempty"`
 	HistoryDigest   []string                  `json:"history_digest,omitempty"`
 	RoleNotes       map[string]DebateRoleNote `json:"role_notes,omitempty"`
 	Revision        int                       `json:"revision"`
@@ -155,10 +161,14 @@ func (s *DebateStore) LoadOrInitBlackboard(room *DebateRoom) (*DebateBlackboard,
 
 	now := time.Now()
 	board := &DebateBlackboard{
-		RoomID:      room.RoomID,
-		Topic:       strings.TrimSpace(room.Question),
-		Goal:        "围绕讨论主题形成可执行结论与行动项（含责任人和验收标准）。",
-		Constraints: []string{"多角色协作", "结论可执行", "建议可验证"},
+		RoomID:       room.RoomID,
+		Mode:         emptyAs(strings.ToLower(strings.TrimSpace(room.Mode)), DebateModeClassic),
+		Phase:        emptyAs(strings.TrimSpace(room.Phase), "init"),
+		Iteration:    room.Iteration,
+		Topic:        strings.TrimSpace(room.Question),
+		RefinedTopic: strings.TrimSpace(room.RefinedQuestion),
+		Goal:         "围绕讨论主题形成可执行结论与行动项（含责任人和验收标准）。",
+		Constraints:  []string{"多角色协作", "结论可执行", "建议可验证"},
 		ExpectedOutput: []string{
 			"关键结论（3条内）",
 			"主要风险（3条内）",
@@ -191,6 +201,22 @@ func UpdateBlackboardRound(board *DebateBlackboard, round, maxRounds int) {
 	}
 	board.RoundPlan = defaultRoundPlan(round, board.MaxRounds)
 	board.RoundFocus = defaultRoundFocus(round, board.MaxRounds)
+	board.UpdatedAt = time.Now()
+}
+
+func UpdateBlackboardWorkflow(board *DebateBlackboard, mode, phase string, iteration int) {
+	if board == nil {
+		return
+	}
+	if strings.TrimSpace(mode) != "" {
+		board.Mode = strings.ToLower(strings.TrimSpace(mode))
+	}
+	if strings.TrimSpace(phase) != "" {
+		board.Phase = strings.TrimSpace(phase)
+	}
+	if iteration >= 0 {
+		board.Iteration = iteration
+	}
 	board.UpdatedAt = time.Now()
 }
 
