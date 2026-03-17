@@ -71,3 +71,42 @@ func (c *LocalInstanceClient) Ask(ctx context.Context, socketPath string, req As
 	out.ToolCount = raw.ToolCount
 	return out, nil
 }
+
+func (c *LocalInstanceClient) Send(ctx context.Context, socketPath string, req SendRequest) error {
+	socketPath = strings.TrimSpace(socketPath)
+	if socketPath == "" {
+		return fmt.Errorf("socket path is required")
+	}
+
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("marshal send request: %w", err)
+	}
+
+	httpClient := &http.Client{
+		Timeout: 2 * time.Minute,
+		Transport: &http.Transport{
+			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+				return net.Dial("unix", socketPath)
+			},
+		},
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://unix/send", bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("request /send failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("send status=%d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
+}

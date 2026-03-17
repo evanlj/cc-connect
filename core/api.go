@@ -140,9 +140,16 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := engine.SendToSession(req.SessionKey, req.Message); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	if strings.TrimSpace(req.SessionKey) != "" {
+		if err := engine.SendBySessionKey(req.SessionKey, req.Message); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		if err := engine.SendToSession(req.SessionKey, req.Message); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")

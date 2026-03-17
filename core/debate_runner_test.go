@@ -78,6 +78,25 @@ func TestFlattenPromptForTransport(t *testing.T) {
 	}
 }
 
+func TestDebateReplyNeedsRepairMenuized(t *testing.T) {
+	reply := "【观点】先确认方向。\n【依据】信息不足。\n【风险/反例】可能跑偏。\n【建议动作】你要选哪一类？回复 1/2/3/4。"
+	need, issues := debateReplyNeedsRepair(reply)
+	if !need {
+		t.Fatalf("menuized reply should require repair, issues=%v", issues)
+	}
+	if len(issues) == 0 {
+		t.Fatal("issues should not be empty")
+	}
+}
+
+func TestDebateReplyNeedsRepairGoodReply(t *testing.T) {
+	reply := "【观点】先按能力边界把需求拆成并行工作流。\n【依据】并行切片可降低串行等待。\n【风险/反例】切片过细会增加沟通成本。\n【建议动作】先定义 4 条并行泳道并约定验收口径。"
+	need, issues := debateReplyNeedsRepair(reply)
+	if need {
+		t.Fatalf("good reply should not require repair, issues=%v", issues)
+	}
+}
+
 func containsAll(s string, subs ...string) bool {
 	for _, sub := range subs {
 		if !strings.Contains(s, sub) {

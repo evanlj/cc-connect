@@ -141,8 +141,8 @@ func (e *Engine) runDebateRoom(ctx context.Context, roomID string) {
 				SessionKey:  buildRoleSessionKey(room.OwnerSessionKey, room.GroupChatID, room.RoomID, role.Role),
 				Prompt:      flattenPromptForTransport(buildRolePrompt(room, role, round, transcript, board, blackboardPath)),
 				TimeoutSec:  120,
-				Speak:       true,
-				SpeakPrefix: fmt.Sprintf("【%s】", role.DisplayName),
+				Speak:       false,
+				SpeakPrefix: "",
 			}
 
 			roleCtx, cancel := context.WithTimeout(ctx, 130*time.Second)
@@ -153,10 +153,41 @@ func (e *Engine) runDebateRoom(ctx context.Context, roomID string) {
 				entry.Content = "ERROR: " + askErr.Error()
 				_ = e.SendBySessionKey(room.OwnerSessionKey, fmt.Sprintf("【Jarvis】%s 本轮调用失败：%s", role.DisplayName, truncateStr(askErr.Error(), 80)))
 			} else {
-				entry.Content = res.Content
-				entry.LatencyMS = res.LatencyMS
+				finalContent := strings.TrimSpace(res.Content)
+				finalLatency := res.LatencyMS
+
+				repairNeeded, issues := debateReplyNeedsRepair(finalContent)
+				if repairNeeded {
+					slog.Warn("debate: role reply needs repair", "room_id", room.RoomID, "role", role.Role, "round", round, "issues", issues)
+					if repaired, repairedLatency, repairErr := e.retryDebateReply(ctx, socketPath, askReq, room, role, round, board, finalContent, issues); repairErr == nil {
+						finalContent = strings.TrimSpace(repaired)
+						finalLatency += repairedLatency
+					} else {
+						slog.Warn("debate: repair attempt failed", "room_id", room.RoomID, "role", role.Role, "round", round, "error", repairErr)
+					}
+				}
+
+				if strings.TrimSpace(finalContent) == "" {
+					finalContent = e.i18n.T(MsgEmptyResponse)
+				}
+
+				speakReq := SendRequest{
+					Project:    emptyAs(role.Project, role.Instance),
+					SessionKey: askReq.SessionKey,
+					Message:    fmt.Sprintf("【%s】%s", role.DisplayName, finalContent),
+				}
+				sendCtx, sendCancel := context.WithTimeout(ctx, 20*time.Second)
+				sendErr := e.instanceCli.Send(sendCtx, socketPath, speakReq)
+				sendCancel()
+				if sendErr != nil {
+					_ = e.SendBySessionKey(room.OwnerSessionKey, speakReq.Message)
+					_ = e.SendBySessionKey(room.OwnerSessionKey, fmt.Sprintf("【Jarvis】%s 角色发言走降级通道：%s", role.DisplayName, truncateStr(sendErr.Error(), 80)))
+				}
+
+				entry.Content = finalContent
+				entry.LatencyMS = finalLatency
 				spoken[role.Role] = true
-				ApplyRoleContribution(board, role, round, res.Content)
+				ApplyRoleContribution(board, role, round, finalContent)
 				if board != nil {
 					_ = e.debateStore.SaveBlackboard(board)
 				}
@@ -189,6 +220,26 @@ func (e *Engine) runDebateRoom(ctx context.Context, roomID string) {
 	room.Status = DebateStatusCompleted
 	room.StopReason = ""
 	_ = e.debateStore.SaveRoom(room)
+}
+
+func (e *Engine) retryDebateReply(ctx context.Context, socketPath string, baseReq AskRequest, room *DebateRoom, role DebateRole, round int, board *DebateBlackboard, badReply string, issues []string) (string, int64, error) {
+	repairReq := baseReq
+	repairReq.Prompt = flattenPromptForTransport(buildDebateRepairPrompt(room, role, round, board, badReply, issues))
+	repairReq.Speak = false
+	repairReq.SpeakPrefix = ""
+
+	roleCtx, cancel := context.WithTimeout(ctx, 130*time.Second)
+	defer cancel()
+
+	res, err := e.instanceCli.Ask(roleCtx, socketPath, repairReq)
+	if err != nil {
+		return "", 0, err
+	}
+	reply := strings.TrimSpace(res.Content)
+	if needsRepair, _ := debateReplyNeedsRepair(reply); needsRepair {
+		return reply, res.LatencyMS, fmt.Errorf("repair reply still invalid")
+	}
+	return reply, res.LatencyMS, nil
 }
 
 func selectDebateSpeakers(policy string, round int, workers []DebateRole, spoken map[string]bool, maxRounds int) []DebateRole {
@@ -333,6 +384,65 @@ func buildRolePrompt(room *DebateRoom, role DebateRole, round int, transcript []
 	b.WriteString("}\n")
 	b.WriteString("```\n")
 	return b.String()
+}
+
+func buildDebateRepairPrompt(room *DebateRoom, role DebateRole, round int, board *DebateBlackboard, badReply string, issues []string) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("你是 %s（角色：%s）。\n", role.DisplayName, role.Role))
+	b.WriteString("你上一条回复未通过主持人校验，必须立即修正。\n")
+	b.WriteString("禁止菜单化、禁止让用户继续选方向、禁止重复角色自我确认。\n\n")
+	if len(issues) > 0 {
+		b.WriteString("未通过原因：\n")
+		for _, issue := range issues {
+			if strings.TrimSpace(issue) == "" {
+				continue
+			}
+			b.WriteString(fmt.Sprintf("- %s\n", issue))
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("[讨论目标]\n")
+	b.WriteString(fmt.Sprintf("- 主题：%s\n", room.Question))
+	b.WriteString(fmt.Sprintf("- 当前轮次：第 %d/%d 轮\n", round, room.MaxRounds))
+	if board != nil {
+		if strings.TrimSpace(board.RoundPlan) != "" {
+			b.WriteString(fmt.Sprintf("- 本轮计划：%s\n", board.RoundPlan))
+		}
+		if strings.TrimSpace(board.RoundFocus) != "" {
+			b.WriteString(fmt.Sprintf("- 本轮焦点：%s\n", board.RoundFocus))
+		}
+	}
+	b.WriteString("\n")
+	b.WriteString("你上一条不合格回复（仅供参考，不要复述）：\n")
+	b.WriteString(truncateStr(strings.TrimSpace(badReply), 400))
+	b.WriteString("\n\n")
+	b.WriteString("请重新输出，必须严格满足：\n")
+	b.WriteString("1) 必须围绕主题给出实质观点；\n")
+	b.WriteString("2) 不能出现“回复1/2/3/4”“你要选哪一类”等菜单语句；\n")
+	b.WriteString("3) 使用固定四段结构。\n\n")
+	b.WriteString("【观点】\n【依据】\n【风险/反例】\n【建议动作】\n")
+	return b.String()
+}
+
+var debateMenuReplyPattern = regexp.MustCompile(`(?is)(回复\s*1\s*/\s*2\s*/\s*3\s*/\s*4|你要选哪一类|先选方向|先确认你要做哪一类|TAPD（需求/缺陷/验收/回填）|OpenSpec 发布到 HTTP|Unity\s*/\s*AGame|代码实现\s*/\s*调试\s*/\s*文档)`)
+
+func debateReplyNeedsRepair(reply string) (bool, []string) {
+	reply = strings.TrimSpace(reply)
+	issues := make([]string, 0, 4)
+	if reply == "" {
+		issues = append(issues, "回复为空")
+		return true, issues
+	}
+	if debateMenuReplyPattern.MatchString(reply) {
+		issues = append(issues, "出现菜单化引导语句")
+	}
+	if !strings.Contains(reply, "【观点】") {
+		issues = append(issues, "缺少【观点】段落")
+	}
+	if !strings.Contains(reply, "【建议动作】") {
+		issues = append(issues, "缺少【建议动作】段落")
+	}
+	return len(issues) > 0, issues
 }
 
 func flattenPromptForTransport(prompt string) string {
