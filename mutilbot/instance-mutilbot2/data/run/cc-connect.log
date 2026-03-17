@@ -1,0 +1,122 @@
+time=2026-03-17T14:43:25.072+08:00 level=INFO msg="codex: provider switched" provider=codez
+time=2026-03-17T14:43:25.073+08:00 level=INFO msg="platform started" project=instance-mutilbot2-project-jianzhu platform=feishu
+time=2026-03-17T14:43:25.073+08:00 level=INFO msg="engine started" project=instance-mutilbot2-project-jianzhu agent=codex platforms=1
+time=2026-03-17T14:43:25.073+08:00 level=INFO msg="cron: scheduler started" jobs=0
+time=2026-03-17T14:43:25.075+08:00 level=INFO msg="api server started" socket=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\run\api.sock
+time=2026-03-17T14:43:25.075+08:00 level=INFO msg="cc-connect is running" projects=1
+time=2026-03-17T14:46:12.677+08:00 level=INFO msg="processing message" platform=feishu user=user session=s1
+time=2026-03-17T14:46:12.678+08:00 level=INFO msg="interactive session started" session_key=feishu:oc_fbfc7a3195bdb8cd97d2f20195c59b99:ou_bc504056522cf953ec5db98cf5e86cc6 agent_session=""
+time=2026-03-17T14:46:12.758+08:00 level=INFO msg="codexSession: turn trace enabled" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\traces\codex\2026-03-17\144612.758565200_turn_1.jsonl
+time=2026-03-17T14:51:23.700+08:00 level=INFO msg="processing message" platform=feishu user=user session=s1
+time=2026-03-17T14:51:23.773+08:00 level=INFO msg="codexSession: turn trace enabled" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\traces\codex\2026-03-17\145123.773237700_turn_2.jsonl
+time=2026-03-17T14:59:16.186+08:00 level=INFO msg="shutting down..."
+time=2026-03-17T14:59:16.187+08:00 level=ERROR msg="api server error" error="accept unix D:\\ai-github\\cc-connect\\mutilbot\\instance-mutilbot2\\data\\run\\api.sock: use of closed network connection"
+time=2026-03-17T14:59:16.187+08:00 level=INFO msg=bye
+time=2026-03-17T15:14:38.037+08:00 level=INFO msg="codex: provider switched" provider=codez
+time=2026-03-17T15:14:38.038+08:00 level=INFO msg="session: loaded from disk" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\sessions\instance-mutilbot2-project-jianzhu_4b61ed77.json sessions=1
+time=2026-03-17T15:14:38.038+08:00 level=INFO msg="platform started" project=instance-mutilbot2-project-jianzhu platform=feishu
+time=2026-03-17T15:14:38.038+08:00 level=INFO msg="engine started" project=instance-mutilbot2-project-jianzhu agent=codex platforms=1
+time=2026-03-17T15:14:38.038+08:00 level=INFO msg="cron: scheduler started" jobs=0
+time=2026-03-17T15:14:38.040+08:00 level=INFO msg="api server started" socket=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\run\api.sock
+time=2026-03-17T15:14:38.040+08:00 level=INFO msg="cc-connect is running" projects=1
+time=2026-03-17T15:14:56.592+08:00 level=INFO msg="processing message" platform=feishu user=user session=s1
+time=2026-03-17T15:14:56.592+08:00 level=INFO msg="interactive session started" session_key=feishu:oc_fbfc7a3195bdb8cd97d2f20195c59b99:ou_bc504056522cf953ec5db98cf5e86cc6 agent_session=019cfa8b-82d9-7a40-b3c7-aaa0854d01b6
+time=2026-03-17T15:14:56.686+08:00 level=INFO msg="codexSession: turn trace enabled" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\traces\codex\2026-03-17\151456.648427200_turn_1.jsonl
+time=2026-03-17T15:34:47.506+08:00 level=INFO msg="shutting down..."
+time=2026-03-17T15:34:47.508+08:00 level=ERROR msg="api server error" error="accept unix D:\\ai-github\\cc-connect\\mutilbot\\instance-mutilbot2\\data\\run\\api.sock: use of closed network connection"
+time=2026-03-17T15:34:47.508+08:00 level=INFO msg=bye
+time=2026-03-17T15:37:36.456+08:00 level=INFO msg="codex: provider switched" provider=codez
+time=2026-03-17T15:37:36.457+08:00 level=INFO msg="session: loaded from disk" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\sessions\instance-mutilbot2-project-jianzhu_4b61ed77.json sessions=1
+time=2026-03-17T15:37:36.457+08:00 level=INFO msg="platform started" project=instance-mutilbot2-project-jianzhu platform=feishu
+time=2026-03-17T15:37:36.457+08:00 level=INFO msg="engine started" project=instance-mutilbot2-project-jianzhu agent=codex platforms=1
+time=2026-03-17T15:37:36.458+08:00 level=INFO msg="cron: scheduler started" jobs=0
+time=2026-03-17T15:37:36.460+08:00 level=INFO msg="api server started" socket=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\run\api.sock
+time=2026-03-17T15:37:36.460+08:00 level=INFO msg="cc-connect is running" projects=1
+time=2026-03-17T15:46:09.708+08:00 level=INFO msg="interactive session started" session_key=feishu:oc_fbfc7a3195bdb8cd97d2f20195c59b99:debate_jianzhu agent_session=""
+time=2026-03-17T15:46:09.780+08:00 level=INFO msg="codexSession: turn trace enabled" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\traces\codex\2026-03-17\154609.780974300_turn_1.jsonl
+time=2026-03-17T15:47:33.478+08:00 level=INFO msg="codexSession: turn trace enabled" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\traces\codex\2026-03-17\154733.478120800_turn_2.jsonl
+time=2026-03-17T15:54:05.065+08:00 level=INFO msg="codexSession: turn trace enabled" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\traces\codex\2026-03-17\155405.065311700_turn_3.jsonl
+time=2026-03-17T15:54:57.528+08:00 level=INFO msg="codexSession: turn trace enabled" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\traces\codex\2026-03-17\155457.528570100_turn_4.jsonl
+time=2026-03-17T16:06:16.734+08:00 level=INFO msg="shutting down..."
+time=2026-03-17T16:06:16.735+08:00 level=ERROR msg="api server error" error="accept unix D:\\ai-github\\cc-connect\\mutilbot\\instance-mutilbot2\\data\\run\\api.sock: use of closed network connection"
+time=2026-03-17T16:06:16.735+08:00 level=INFO msg=bye
+time=2026-03-17T16:14:39.956+08:00 level=INFO msg="codex: provider switched" provider=codez
+time=2026-03-17T16:14:39.957+08:00 level=INFO msg="session: loaded from disk" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\sessions\instance-mutilbot2-project-jianzhu_4b61ed77.json sessions=2
+time=2026-03-17T16:14:39.957+08:00 level=INFO msg="platform started" project=instance-mutilbot2-project-jianzhu platform=feishu
+time=2026-03-17T16:14:39.957+08:00 level=INFO msg="engine started" project=instance-mutilbot2-project-jianzhu agent=codex platforms=1
+time=2026-03-17T16:14:39.957+08:00 level=INFO msg="cron: scheduler started" jobs=0
+time=2026-03-17T16:14:39.960+08:00 level=INFO msg="api server started" socket=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\run\api.sock
+time=2026-03-17T16:14:39.960+08:00 level=INFO msg="cc-connect is running" projects=1
+time=2026-03-17T16:15:55.205+08:00 level=INFO msg="interactive session started" session_key=feishu:oc_fbfc7a3195bdb8cd97d2f20195c59b99:debate_debate_20260317_161554_658100_jianzhu agent_session=""
+time=2026-03-17T16:15:55.265+08:00 level=INFO msg="codexSession: turn trace enabled" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\traces\codex\2026-03-17\161555.264366300_turn_1.jsonl
+time=2026-03-17T16:17:24.817+08:00 level=INFO msg="codexSession: turn trace enabled" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\traces\codex\2026-03-17\161724.816625000_turn_2.jsonl
+time=2026-03-17T16:26:05.875+08:00 level=INFO msg="interactive session started" session_key=feishu:oc_fbfc7a3195bdb8cd97d2f20195c59b99:debate_debate_20260317_162604_147600_jianzhu agent_session=""
+time=2026-03-17T16:26:05.950+08:00 level=INFO msg="codexSession: turn trace enabled" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\traces\codex\2026-03-17\162605.948643500_turn_3.jsonl
+time=2026-03-17T16:27:26.136+08:00 level=INFO msg="codexSession: turn trace enabled" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\traces\codex\2026-03-17\162726.136452000_turn_4.jsonl
+time=2026-03-17T16:49:23.471+08:00 level=INFO msg="codex: provider switched" provider=codez
+time=2026-03-17T16:49:23.472+08:00 level=INFO msg="session: loaded from disk" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\sessions\instance-mutilbot2-project-jianzhu_4b61ed77.json sessions=4
+time=2026-03-17T16:49:23.472+08:00 level=INFO msg="platform started" project=instance-mutilbot2-project-jianzhu platform=feishu
+time=2026-03-17T16:49:23.472+08:00 level=INFO msg="engine started" project=instance-mutilbot2-project-jianzhu agent=codex platforms=1
+time=2026-03-17T16:49:23.472+08:00 level=INFO msg="cron: scheduler started" jobs=0
+time=2026-03-17T16:49:23.474+08:00 level=INFO msg="api server started" socket=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\run\api.sock
+time=2026-03-17T16:49:23.475+08:00 level=INFO msg="cc-connect is running" projects=1
+time=2026-03-17T16:52:12.031+08:00 level=INFO msg="codex: provider switched" provider=codez
+time=2026-03-17T16:52:12.032+08:00 level=INFO msg="session: loaded from disk" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\sessions\instance-mutilbot2-project-jianzhu_4b61ed77.json sessions=4
+time=2026-03-17T16:52:12.032+08:00 level=INFO msg="platform started" project=instance-mutilbot2-project-jianzhu platform=feishu
+time=2026-03-17T16:52:12.032+08:00 level=INFO msg="engine started" project=instance-mutilbot2-project-jianzhu agent=codex platforms=1
+time=2026-03-17T16:52:12.032+08:00 level=INFO msg="cron: scheduler started" jobs=0
+time=2026-03-17T16:52:12.035+08:00 level=INFO msg="api server started" socket=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\run\api.sock
+time=2026-03-17T16:52:12.035+08:00 level=INFO msg="cc-connect is running" projects=1
+time=2026-03-17T16:52:28.885+08:00 level=INFO msg="codex: provider switched" provider=codez
+time=2026-03-17T16:52:28.886+08:00 level=INFO msg="session: loaded from disk" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\sessions\instance-mutilbot2-project-jianzhu_4b61ed77.json sessions=4
+time=2026-03-17T16:52:28.886+08:00 level=INFO msg="platform started" project=instance-mutilbot2-project-jianzhu platform=feishu
+time=2026-03-17T16:52:28.886+08:00 level=INFO msg="engine started" project=instance-mutilbot2-project-jianzhu agent=codex platforms=1
+time=2026-03-17T16:52:28.886+08:00 level=INFO msg="cron: scheduler started" jobs=0
+time=2026-03-17T16:52:28.889+08:00 level=INFO msg="api server started" socket=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\run\api.sock
+time=2026-03-17T16:52:28.889+08:00 level=INFO msg="cc-connect is running" projects=1
+time=2026-03-17T16:55:11.620+08:00 level=INFO msg="interactive session started" session_key=feishu:oc_fbfc7a3195bdb8cd97d2f20195c59b99:debate_debate_20260317_165510_841800_jianzhu agent_session=""
+time=2026-03-17T16:55:11.795+08:00 level=INFO msg="codexSession: turn trace enabled" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\traces\codex\2026-03-17\165511.792728700_turn_1.jsonl
+time=2026-03-17T16:56:38.324+08:00 level=INFO msg="codexSession: turn trace enabled" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\traces\codex\2026-03-17\165638.323623100_turn_2.jsonl
+time=2026-03-17T17:00:34.487+08:00 level=INFO msg="interactive session started" session_key=feishu:oc_fbfc7a3195bdb8cd97d2f20195c59b99:debate_debate_20260317_170033_652400_jianzhu agent_session=""
+time=2026-03-17T17:00:34.558+08:00 level=INFO msg="codexSession: turn trace enabled" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\traces\codex\2026-03-17\170034.556971900_turn_3.jsonl
+time=2026-03-17T17:01:39.878+08:00 level=INFO msg="codexSession: turn trace enabled" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\traces\codex\2026-03-17\170139.878147700_turn_4.jsonl
+time=2026-03-17T17:42:25.132+08:00 level=INFO msg="codex: provider switched" provider=codez
+time=2026-03-17T17:42:25.133+08:00 level=INFO msg="session: loaded from disk" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\sessions\instance-mutilbot2-project-jianzhu_4b61ed77.json sessions=6
+time=2026-03-17T17:42:25.133+08:00 level=INFO msg="platform started" project=instance-mutilbot2-project-jianzhu platform=feishu
+time=2026-03-17T17:42:25.133+08:00 level=INFO msg="engine started" project=instance-mutilbot2-project-jianzhu agent=codex platforms=1
+time=2026-03-17T17:42:25.133+08:00 level=INFO msg="cron: scheduler started" jobs=0
+time=2026-03-17T17:42:25.136+08:00 level=INFO msg="api server started" socket=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\run\api.sock
+time=2026-03-17T17:42:25.136+08:00 level=INFO msg="cc-connect is running" projects=1
+time=2026-03-17T17:43:06.035+08:00 level=INFO msg="interactive session started" session_key=feishu:oc_fbfc7a3195bdb8cd97d2f20195c59b99:debate_debate_20260317_174304_024000_jianzhu agent_session=""
+time=2026-03-17T17:43:06.214+08:00 level=INFO msg="codexSession: turn trace enabled" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\traces\codex\2026-03-17\174306.212106200_turn_1.jsonl
+time=2026-03-17T17:44:33.041+08:00 level=INFO msg="codexSession: turn trace enabled" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\traces\codex\2026-03-17\174433.039713300_turn_2.jsonl
+time=2026-03-17T18:09:53.838+08:00 level=INFO msg="codex: provider switched" provider=codez
+time=2026-03-17T18:09:53.838+08:00 level=INFO msg="session: loaded from disk" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\sessions\instance-mutilbot2-project-jianzhu_4b61ed77.json sessions=7
+time=2026-03-17T18:09:53.838+08:00 level=INFO msg="platform started" project=instance-mutilbot2-project-jianzhu platform=feishu
+time=2026-03-17T18:09:53.839+08:00 level=INFO msg="engine started" project=instance-mutilbot2-project-jianzhu agent=codex platforms=1
+time=2026-03-17T18:09:53.839+08:00 level=INFO msg="cron: scheduler started" jobs=0
+time=2026-03-17T18:09:53.842+08:00 level=INFO msg="api server started" socket=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\run\api.sock
+time=2026-03-17T18:09:53.842+08:00 level=INFO msg="cc-connect is running" projects=1
+time=2026-03-17T18:10:24.552+08:00 level=INFO msg="interactive session started" session_key=feishu:oc_fbfc7a3195bdb8cd97d2f20195c59b99:debate_debate_20260317_181023_470100_jianzhu agent_session=""
+time=2026-03-17T18:10:24.608+08:00 level=INFO msg="codexSession: turn trace enabled" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\traces\codex\2026-03-17\181024.608503000_turn_1.jsonl
+time=2026-03-17T18:15:12.942+08:00 level=INFO msg="codexSession: turn trace enabled" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\traces\codex\2026-03-17\181512.942087900_turn_2.jsonl
+time=2026-03-17T18:48:52.058+08:00 level=INFO msg="codex: provider switched" provider=codez
+time=2026-03-17T18:48:52.059+08:00 level=INFO msg="session: loaded from disk" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\sessions\instance-mutilbot2-project-jianzhu_4b61ed77.json sessions=8
+time=2026-03-17T18:48:52.059+08:00 level=INFO msg="platform started" project=instance-mutilbot2-project-jianzhu platform=feishu
+time=2026-03-17T18:48:52.060+08:00 level=INFO msg="engine started" project=instance-mutilbot2-project-jianzhu agent=codex platforms=1
+time=2026-03-17T18:48:52.060+08:00 level=INFO msg="cron: scheduler started" jobs=0
+time=2026-03-17T18:48:52.062+08:00 level=INFO msg="api server started" socket=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\run\api.sock
+time=2026-03-17T18:48:52.062+08:00 level=INFO msg="cc-connect is running" projects=1
+time=2026-03-17T18:50:20.698+08:00 level=INFO msg="interactive session started" session_key=feishu:oc_fbfc7a3195bdb8cd97d2f20195c59b99:debate_debate_20260317_185019_049200_jianzhu agent_session=""
+time=2026-03-17T18:50:20.858+08:00 level=INFO msg="codexSession: turn trace enabled" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\traces\codex\2026-03-17\185020.858783600_turn_1.jsonl
+time=2026-03-17T18:55:02.555+08:00 level=INFO msg="codexSession: turn trace enabled" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\traces\codex\2026-03-17\185502.555243500_turn_2.jsonl
+time=2026-03-17T19:17:31.488+08:00 level=INFO msg="codex: provider switched" provider=codez
+time=2026-03-17T19:17:31.489+08:00 level=INFO msg="session: loaded from disk" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\sessions\instance-mutilbot2-project-jianzhu_4b61ed77.json sessions=9
+time=2026-03-17T19:17:31.489+08:00 level=INFO msg="platform started" project=instance-mutilbot2-project-jianzhu platform=feishu
+time=2026-03-17T19:17:31.489+08:00 level=INFO msg="engine started" project=instance-mutilbot2-project-jianzhu agent=codex platforms=1
+time=2026-03-17T19:17:31.489+08:00 level=INFO msg="cron: scheduler started" jobs=0
+time=2026-03-17T19:17:31.491+08:00 level=INFO msg="api server started" socket=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\run\api.sock
+time=2026-03-17T19:17:31.491+08:00 level=INFO msg="cc-connect is running" projects=1
+time=2026-03-17T19:19:03.677+08:00 level=INFO msg="interactive session started" session_key=feishu:oc_fbfc7a3195bdb8cd97d2f20195c59b99:debate_debate_20260317_191902_672700_jianzhu agent_session=""
+time=2026-03-17T19:19:03.847+08:00 level=INFO msg="codexSession: turn trace enabled" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\traces\codex\2026-03-17\191903.845476600_turn_1.jsonl
+time=2026-03-17T19:24:15.641+08:00 level=INFO msg="codexSession: turn trace enabled" path=D:\ai-github\cc-connect\mutilbot\instance-mutilbot2\data\traces\codex\2026-03-17\192415.641473100_turn_2.jsonl
