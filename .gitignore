@@ -38,4 +38,9 @@ instances/**/output/
 instances/**/stdout
 instances/**/stdout.*
 instances/**/.vscode/
-instances/.shared-skills/
+# Keep shared-skills local by default, but allow selected skills to be versioned.
+instances/.shared-skills/*
+!instances/.shared-skills/skills/
+instances/.shared-skills/skills/*
+!instances/.shared-skills/skills/tapd-format-guard/
+!instances/.shared-skills/skills/tapd-format-guard/**

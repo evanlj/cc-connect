@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -28,6 +29,16 @@ type SendRequest struct {
 	Project    string `json:"project"`
 	SessionKey string `json:"session_key"`
 	Message    string `json:"message"`
+}
+
+// AskRequest is the JSON body for POST /ask.
+type AskRequest struct {
+	Project     string `json:"project"`
+	SessionKey  string `json:"session_key"`
+	Prompt      string `json:"prompt"`
+	TimeoutSec  int    `json:"timeout_sec"`
+	Speak       bool   `json:"speak"`
+	SpeakPrefix string `json:"speak_prefix"`
 }
 
 // NewAPIServer creates an API server on a Unix socket.
@@ -54,6 +65,7 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 		engines:    make(map[string]*Engine),
 	}
 	s.mux.HandleFunc("/send", s.handleSend)
+	s.mux.HandleFunc("/ask", s.handleAsk)
 	s.mux.HandleFunc("/sessions", s.handleSessions)
 	s.mux.HandleFunc("/cron/add", s.handleCronAdd)
 	s.mux.HandleFunc("/cron/list", s.handleCronList)
@@ -135,6 +147,82 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *APIServer) handleAsk(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req AskRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.SessionKey = strings.TrimSpace(req.SessionKey)
+	req.Prompt = strings.TrimSpace(req.Prompt)
+
+	if req.SessionKey == "" {
+		http.Error(w, "session_key is required", http.StatusBadRequest)
+		return
+	}
+	if req.Prompt == "" {
+		http.Error(w, "prompt is required", http.StatusBadRequest)
+		return
+	}
+
+	s.mu.RLock()
+	engine, ok := s.engines[req.Project]
+	s.mu.RUnlock()
+
+	if !ok {
+		// If only one engine, use it by default
+		s.mu.RLock()
+		if len(s.engines) == 1 {
+			for _, e := range s.engines {
+				engine = e
+				ok = true
+			}
+		}
+		s.mu.RUnlock()
+	}
+
+	if !ok {
+		http.Error(w, fmt.Sprintf("project %q not found", req.Project), http.StatusNotFound)
+		return
+	}
+
+	timeout := 120 * time.Second
+	if req.TimeoutSec > 0 {
+		timeout = time.Duration(req.TimeoutSec) * time.Second
+	}
+
+	result, err := engine.AskSession(req.SessionKey, req.Prompt, timeout)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if req.Speak {
+		content := strings.TrimSpace(req.SpeakPrefix + result.Content)
+		if content == "" {
+			content = result.Content
+		}
+		if err := engine.SendBySessionKey(req.SessionKey, content); err != nil {
+			http.Error(w, "speak failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":      "ok",
+		"session_key": req.SessionKey,
+		"content":     result.Content,
+		"latency_ms":  result.LatencyMS,
+		"tool_count":  result.ToolCount,
+	})
 }
 
 func (s *APIServer) handleSessions(w http.ResponseWriter, r *http.Request) {

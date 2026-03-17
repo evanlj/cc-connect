@@ -25,9 +25,9 @@ import (
 	_ "github.com/chenhg5/cc-connect/platform/discord"
 	_ "github.com/chenhg5/cc-connect/platform/feishu"
 	_ "github.com/chenhg5/cc-connect/platform/line"
+	_ "github.com/chenhg5/cc-connect/platform/qq"
 	_ "github.com/chenhg5/cc-connect/platform/slack"
 	_ "github.com/chenhg5/cc-connect/platform/telegram"
-	_ "github.com/chenhg5/cc-connect/platform/qq"
 	_ "github.com/chenhg5/cc-connect/platform/wecom"
 )
 
@@ -52,6 +52,9 @@ func main() {
 			return
 		case "send":
 			runSend(os.Args[2:])
+			return
+		case "ask":
+			runAsk(os.Args[2:])
 			return
 		case "cron":
 			runCron(os.Args[2:])

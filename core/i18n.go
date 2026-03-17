@@ -299,6 +299,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/compress\n  Compress conversation context\n\n" +
 			"/stop\n  Stop current execution\n\n" +
 			"/cron [add|list|del|enable|disable]\n  Manage scheduled tasks\n\n" +
+			"/debate [start|status|stop|list]\n  Manage multi-role discussion rooms (M1 skeleton)\n\n" +
 			"/status\n  Show system status\n\n" +
 			"/version\n  Show cc-connect version\n\n" +
 			"/help\n  Show this help\n\n" +
@@ -321,6 +322,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/compress\n  压缩会话上下文\n\n" +
 			"/stop\n  停止当前执行\n\n" +
 			"/cron [add|list|del|enable|disable]\n  管理定时任务\n\n" +
+			"/debate [start|status|stop|list]\n  管理多角色讨论房间（M1 骨架）\n\n" +
 			"/status\n  查看系统状态\n\n" +
 			"/version\n  查看 cc-connect 版本\n\n" +
 			"/help\n  显示此帮助\n\n" +

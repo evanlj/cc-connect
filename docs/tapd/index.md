@@ -61,6 +61,21 @@
 
 ---
 
+## 3.1 TAPD 富文本排版门禁（避免描述/评论变成一段）
+
+执行 TAPD 写入前后，建议统一走 `format guard`：
+
+- 提交前：HTML lint（禁止未转换 Markdown）
+- 提交后：回读 description/comment 并再次校验结构
+
+工具与说明：
+- `tools/tapd-safe-update.ps1`
+- `tools/tapd-safe-update.bat`
+- `docs/tapd/format-guard.md`
+- `instances/.shared-skills/skills/tapd-format-guard/SKILL.md`
+
+---
+
 ## 4) 信任光谱（Trust Spectrum）— 落地策略（C）
 
 建议分 4 档推进（先 L1，后 L2/L3）：

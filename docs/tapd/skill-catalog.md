@@ -71,3 +71,21 @@
 - 边界：
   - 只做“点状 API 操作”
   - 不自动补齐执行流门禁（由 flow skill 负责）
+
+---
+
+## 4) 排版门禁（防描述/评论塌版）
+
+- Skill：`tapd-format-guard`
+- 典型触发语：
+  - “TAPD 排版又乱了”
+  - “更新需求描述，注意富文本排版”
+  - “先做 lint 再更新 TAPD”
+- 必须门禁（摘要）：
+  - 写入前：HTML lint（禁止原始 Markdown 直写）
+  - 写入后：read-after-write 回读校验
+  - 失败即停止，不得进入执行/验收后续步骤
+- 配套工具：
+  - `tools/tapd-safe-update.ps1`
+  - `tools/tapd-safe-update.bat`
+  - `docs/tapd/format-guard.md`

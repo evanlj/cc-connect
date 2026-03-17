@@ -50,6 +50,10 @@ type Engine struct {
 	providerRemoveSaveFunc func(name string) error
 
 	cronScheduler *CronScheduler
+	debateStore   *DebateStore
+	debateMu      sync.Mutex
+	debateRuns    map[string]context.CancelFunc
+	instanceCli   *LocalInstanceClient
 
 	// When true, this engine will not execute normal agent tasks.
 	// It will still accept slash commands and background helpers (e.g. trace translation).
@@ -84,6 +88,7 @@ type pendingPermission struct {
 
 func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath string, lang Language) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
+	debateRoot := inferDebateStoreRoot(sessionStorePath, name)
 	return &Engine{
 		name:              name,
 		agent:             ag,
@@ -95,6 +100,9 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		display:           DisplayCfg{ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen},
 		interactiveStates: make(map[string]*interactiveState),
 		startedAt:         time.Now(),
+		debateStore:       NewDebateStore(debateRoot),
+		debateRuns:        make(map[string]context.CancelFunc),
+		instanceCli:       NewLocalInstanceClient(),
 	}
 }
 
@@ -126,6 +134,14 @@ func (e *Engine) SetProviderRemoveSaveFunc(fn func(string) error) {
 
 func (e *Engine) SetCronScheduler(cs *CronScheduler) {
 	e.cronScheduler = cs
+}
+
+func (e *Engine) SetDebateStore(store *DebateStore) {
+	e.debateStore = store
+}
+
+func (e *Engine) SetInstanceClient(cli *LocalInstanceClient) {
+	e.instanceCli = cli
 }
 
 func (e *Engine) ProjectName() string {
@@ -201,6 +217,15 @@ func (e *Engine) Start() error {
 
 func (e *Engine) Stop() error {
 	e.cancel()
+
+	e.debateMu.Lock()
+	for roomID, cancel := range e.debateRuns {
+		if cancel != nil {
+			cancel()
+		}
+		delete(e.debateRuns, roomID)
+	}
+	e.debateMu.Unlock()
 
 	e.interactiveMu.Lock()
 	for key, state := range e.interactiveStates {
@@ -768,6 +793,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) {
 		e.cmdHelp(p, msg)
 	case "/version":
 		e.reply(p, msg.ReplyCtx, VersionInfo)
+	case "/debate":
+		e.cmdDebate(p, msg, args)
 	default:
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf("Unknown command: %s\nType /help for available commands.", cmd))
 	}
@@ -806,6 +833,8 @@ func (e *Engine) cmdTrace(p Platform, msg *Message, args []string) {
 			b.WriteString("- `/trace a` 监听 instance-a\n")
 			b.WriteString("- `/trace b` 监听 instance-b\n")
 			b.WriteString("- `/trace c` 监听 instance-c\n")
+			b.WriteString("- `/trace d` 监听 instance-d\n")
+			b.WriteString("- `/trace e` 监听 instance-e\n")
 			b.WriteString("- `/trace instance-a` 同上\n")
 			b.WriteString("- `/trace path D:/.../data/traces/codex` 监听指定目录/文件\n")
 		} else {
@@ -821,6 +850,8 @@ func (e *Engine) cmdTrace(p Platform, msg *Message, args []string) {
 			b.WriteString("- `/trace a` watch instance-a\n")
 			b.WriteString("- `/trace b` watch instance-b\n")
 			b.WriteString("- `/trace c` watch instance-c\n")
+			b.WriteString("- `/trace d` watch instance-d\n")
+			b.WriteString("- `/trace e` watch instance-e\n")
 			b.WriteString("- `/trace instance-a` same\n")
 			b.WriteString("- `/trace path D:/.../data/traces/codex` watch custom dir/file\n")
 		}
@@ -857,9 +888,9 @@ func (e *Engine) cmdTrace(p Platform, msg *Message, args []string) {
 	inst := normalizeInstanceArg(target)
 	if inst == "" {
 		if isZh {
-			e.reply(p, msg.ReplyCtx, "❌ 参数不支持。用法：`/trace a|b|c` 或 `/trace path <目录>`")
+			e.reply(p, msg.ReplyCtx, "❌ 参数不支持。用法：`/trace a|b|c|d|e` 或 `/trace path <目录>`")
 		} else {
-			e.reply(p, msg.ReplyCtx, "❌ Unsupported argument. Usage: `/trace a|b|c` or `/trace path <dir>`")
+			e.reply(p, msg.ReplyCtx, "❌ Unsupported argument. Usage: `/trace a|b|c|d|e` or `/trace path <dir>`")
 		}
 		return
 	}
@@ -1189,6 +1220,10 @@ func normalizeInstanceArg(raw string) string {
 		return "instance-b"
 	case "c", "inst-c", "instance-c":
 		return "instance-c"
+	case "d", "inst-d", "instance-d":
+		return "instance-d"
+	case "e", "inst-e", "instance-e":
+		return "instance-e"
 	}
 
 	if strings.HasPrefix(s, "instance-") {
