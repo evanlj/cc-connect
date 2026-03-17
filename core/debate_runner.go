@@ -170,11 +170,15 @@ func (e *Engine) runDebateRoom(ctx context.Context, roomID string) {
 				if strings.TrimSpace(finalContent) == "" {
 					finalContent = e.i18n.T(MsgEmptyResponse)
 				}
+				displayContent := extractDebateDisplayContent(finalContent)
+				if strings.TrimSpace(displayContent) == "" {
+					displayContent = finalContent
+				}
 
 				speakReq := SendRequest{
 					Project:    emptyAs(role.Project, role.Instance),
 					SessionKey: askReq.SessionKey,
-					Message:    fmt.Sprintf("【%s】%s", role.DisplayName, finalContent),
+					Message:    fmt.Sprintf("【%s】%s", role.DisplayName, displayContent),
 				}
 				sendCtx, sendCancel := context.WithTimeout(ctx, 20*time.Second)
 				sendErr := e.instanceCli.Send(sendCtx, socketPath, speakReq)
@@ -184,7 +188,7 @@ func (e *Engine) runDebateRoom(ctx context.Context, roomID string) {
 					_ = e.SendBySessionKey(room.OwnerSessionKey, fmt.Sprintf("【Jarvis】%s 角色发言走降级通道：%s", role.DisplayName, truncateStr(sendErr.Error(), 80)))
 				}
 
-				entry.Content = finalContent
+				entry.Content = displayContent
 				entry.LatencyMS = finalLatency
 				spoken[role.Role] = true
 				ApplyRoleContribution(board, role, round, finalContent)
@@ -212,7 +216,20 @@ func (e *Engine) runDebateRoom(ctx context.Context, roomID string) {
 	summary := e.buildDebateSummary(room, transcript, board)
 	summarySessionKey := buildRoleSessionKey(room.OwnerSessionKey, room.GroupChatID, room.RoomID, "jarvis_summary")
 	if askRes, err := e.AskSession(summarySessionKey, summary, 120*time.Second); err == nil {
-		_ = e.SendBySessionKey(room.OwnerSessionKey, "【Jarvis-总结】\n"+askRes.Content)
+		summaryContent := strings.TrimSpace(askRes.Content)
+		if retryNeeded, issues := debateSummaryNeedsRepair(summaryContent); retryNeeded {
+			slog.Warn("debate: summary needs repair", "room_id", room.RoomID, "issues", issues)
+			repairPrompt := buildDebateSummaryRepairPrompt(room, transcript, board, summaryContent, issues)
+			if retryRes, retryErr := e.AskSession(summarySessionKey, repairPrompt, 120*time.Second); retryErr == nil {
+				summaryContent = strings.TrimSpace(retryRes.Content)
+			} else {
+				slog.Warn("debate: summary repair failed", "room_id", room.RoomID, "error", retryErr)
+			}
+		}
+		if retryNeeded, _ := debateSummaryNeedsRepair(summaryContent); retryNeeded {
+			summaryContent = fallbackDebateSummary(room, transcript)
+		}
+		_ = e.SendBySessionKey(room.OwnerSessionKey, "【Jarvis-总结】\n"+summaryContent)
 	} else {
 		_ = e.SendBySessionKey(room.OwnerSessionKey, "【Jarvis-总结】\n"+fallbackDebateSummary(room, transcript))
 	}
@@ -424,7 +441,64 @@ func buildDebateRepairPrompt(room *DebateRoom, role DebateRole, round int, board
 	return b.String()
 }
 
+func extractDebateDisplayContent(reply string) string {
+	reply = strings.TrimSpace(reply)
+	if reply == "" {
+		return ""
+	}
+	_, visible := extractWritebackPayload(reply)
+	visible = strings.TrimSpace(visible)
+	if visible == "" {
+		visible = reply
+	}
+	if loc := debateWritebackSectionStartPattern.FindStringIndex(visible); loc != nil {
+		visible = strings.TrimSpace(visible[:loc[0]])
+	}
+	visible = debateDisplayHeaderPattern.ReplaceAllString(visible, "")
+	return strings.TrimSpace(visible)
+}
+
+func buildDebateSummaryRepairPrompt(room *DebateRoom, transcript []DebateTranscriptEntry, board *DebateBlackboard, badSummary string, issues []string) string {
+	var b strings.Builder
+	b.WriteString("你刚才的总结未通过校验。不要索要额外材料，必须基于当前上下文直接输出。\n")
+	if len(issues) > 0 {
+		b.WriteString("问题：\n")
+		for _, issue := range issues {
+			if strings.TrimSpace(issue) == "" {
+				continue
+			}
+			b.WriteString("- " + issue + "\n")
+		}
+	}
+	b.WriteString("\n请按以下结构输出（中文）：\n")
+	b.WriteString("1) 最终结论（最多3条）\n")
+	b.WriteString("2) 主要风险（最多3条）\n")
+	b.WriteString("3) 行动项（每条必须含 owner + deadline + 验收标准）\n\n")
+	b.WriteString(fmt.Sprintf("主题：%s\n", room.Question))
+	if board != nil && strings.TrimSpace(board.Goal) != "" {
+		b.WriteString(fmt.Sprintf("目标：%s\n", board.Goal))
+	}
+	b.WriteString("你上一条不合格总结如下（仅供纠偏，勿复述）：\n")
+	b.WriteString(truncateStr(strings.TrimSpace(badSummary), 300))
+	b.WriteString("\n")
+	if len(transcript) > 0 {
+		b.WriteString("最近讨论片段（用于你快速聚焦）：\n")
+		start := 0
+		if len(transcript) > 4 {
+			start = len(transcript) - 4
+		}
+		for i := start; i < len(transcript); i++ {
+			t := transcript[i]
+			b.WriteString(fmt.Sprintf("- [R%d][%s] %s\n", t.Round, t.Role, truncateStr(t.Content, 140)))
+		}
+	}
+	return b.String()
+}
+
 var debateMenuReplyPattern = regexp.MustCompile(`(?is)(回复\s*1\s*/\s*2\s*/\s*3\s*/\s*4|你要选哪一类|先选方向|先确认你要做哪一类|TAPD（需求/缺陷/验收/回填）|OpenSpec 发布到 HTTP|Unity\s*/\s*AGame|代码实现\s*/\s*调试\s*/\s*文档)`)
+var debateWritebackSectionStartPattern = regexp.MustCompile(`(?is)\bB\)\s*(黑板回填|writeback|回填)`)
+var debateDisplayHeaderPattern = regexp.MustCompile(`(?is)^\s*A\)\s*群内可读内容（精简）[:：]?\s*`)
+var debateSummaryRefusalPattern = regexp.MustCompile(`(?is)(贴出来|发我后|你把.*发我|我才能总结|未指定格式|请提供.*记录|需要.*记录)`)
 
 func debateReplyNeedsRepair(reply string) (bool, []string) {
 	reply = strings.TrimSpace(reply)
@@ -441,6 +515,28 @@ func debateReplyNeedsRepair(reply string) (bool, []string) {
 	}
 	if !strings.Contains(reply, "【建议动作】") {
 		issues = append(issues, "缺少【建议动作】段落")
+	}
+	return len(issues) > 0, issues
+}
+
+func debateSummaryNeedsRepair(summary string) (bool, []string) {
+	summary = strings.TrimSpace(summary)
+	issues := make([]string, 0, 4)
+	if summary == "" {
+		issues = append(issues, "总结内容为空")
+		return true, issues
+	}
+	if debateSummaryRefusalPattern.MatchString(summary) {
+		issues = append(issues, "总结内容在索要额外输入材料")
+	}
+	if !strings.Contains(summary, "结论") && !strings.Contains(summary, "共识") {
+		issues = append(issues, "缺少最终结论段")
+	}
+	if !strings.Contains(summary, "风险") {
+		issues = append(issues, "缺少主要风险段")
+	}
+	if !strings.Contains(summary, "行动项") && !strings.Contains(strings.ToLower(summary), "owner") && !strings.Contains(summary, "负责人") {
+		issues = append(issues, "缺少行动项（owner/deadline/验收）")
 	}
 	return len(issues) > 0, issues
 }

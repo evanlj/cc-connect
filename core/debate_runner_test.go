@@ -97,6 +97,39 @@ func TestDebateReplyNeedsRepairGoodReply(t *testing.T) {
 	}
 }
 
+func TestExtractDebateDisplayContentDropsWritebackSection(t *testing.T) {
+	raw := "A) 群内可读内容（精简）：\n【观点】先定边界。\n【依据】避免返工。\n【风险/反例】不定边界会分叉。\n【建议动作】先出边界表。\n\nB) 黑板回填 JSON：\n```json\n{\"type\":\"blackboard_writeback\",\"room_id\":\"r1\",\"role\":\"jianzhu\"}\n```"
+	got := extractDebateDisplayContent(raw)
+	if got == "" {
+		t.Fatal("display content should not be empty")
+	}
+	if strings.Contains(got, "黑板回填") || strings.Contains(got, "blackboard_writeback") {
+		t.Fatalf("display content should drop writeback section, got: %q", got)
+	}
+	if !containsAll(got, "【观点】", "【建议动作】") {
+		t.Fatalf("display content missing core sections: %q", got)
+	}
+}
+
+func TestDebateSummaryNeedsRepairRefusal(t *testing.T) {
+	bad := "把讨论记录贴出来我才能总结。你把原文发我后我再输出。"
+	need, issues := debateSummaryNeedsRepair(bad)
+	if !need {
+		t.Fatalf("refusal summary should require repair, issues=%v", issues)
+	}
+	if len(issues) == 0 {
+		t.Fatal("issues should not be empty")
+	}
+}
+
+func TestDebateSummaryNeedsRepairGoodSummary(t *testing.T) {
+	okSummary := "最终结论：采用组合式+数据驱动。\n主要风险：模块粒度过碎、指标过理想。\n行动项：\n- owner: jianzhu, deadline: 2026-03-18, 验收标准: 提交边界决策表。"
+	need, issues := debateSummaryNeedsRepair(okSummary)
+	if need {
+		t.Fatalf("good summary should not require repair, issues=%v", issues)
+	}
+}
+
 func containsAll(s string, subs ...string) bool {
 	for _, sub := range subs {
 		if !strings.Contains(s, sub) {
