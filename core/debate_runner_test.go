@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -143,6 +144,24 @@ func TestDebateSummaryNeedsRepairPendingOwner(t *testing.T) {
 	}
 	if len(issues) == 0 {
 		t.Fatal("issues should not be empty")
+	}
+}
+
+func TestIsAskTimeoutErr(t *testing.T) {
+	cases := []struct {
+		err  error
+		want bool
+	}{
+		{err: nil, want: false},
+		{err: errors.New("ask status=500: ask timeout after 2m20s"), want: true},
+		{err: errors.New("context deadline exceeded"), want: true},
+		{err: errors.New("network unreachable"), want: false},
+	}
+	for _, tc := range cases {
+		got := isAskTimeoutErr(tc.err)
+		if got != tc.want {
+			t.Fatalf("isAskTimeoutErr(%v)=%v want=%v", tc.err, got, tc.want)
+		}
 	}
 }
 

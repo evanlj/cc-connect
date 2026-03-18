@@ -344,28 +344,39 @@ func (e *Engine) runConsensusDebateRoom(ctx context.Context, room *DebateRoom) {
 		_ = e.SendBySessionKey(room.OwnerSessionKey, "【Jarvis】阶段1/6：主持人先行立论并同步黑板。")
 		reply, latency, err := e.askDebateRole(ctx, room, host, buildConsensusHostSeedPrompt(room, board, topic, blackboardPath))
 		if err != nil {
-			room.Status = DebateStatusFailed
-			room.StopReason = "host_seed_failed"
-			_ = e.debateStore.SaveRoom(room)
-			_ = e.SendBySessionKey(room.OwnerSessionKey, fmt.Sprintf("【Jarvis】主持人立论失败：%s", truncateStr(err.Error(), 100)))
-			return
+			// Fallback instead of hard-fail:
+			// keep discussion moving even if host model call times out.
+			fallback := buildConsensusHostSeedFallback(topic, board)
+			_ = e.SendBySessionKey(room.OwnerSessionKey, fmt.Sprintf("【Jarvis】主持人立论超时，已启用兜底立论继续流程：%s", truncateStr(err.Error(), 120)))
+			_ = e.sendDebateRoleSpeech(ctx, room, host, fallback)
+			entry := DebateTranscriptEntry{
+				Round:    0,
+				Speaker:  host.Instance,
+				Role:     host.Role,
+				PostedBy: host.Instance,
+				Content:  fallback,
+			}
+			_ = e.debateStore.AppendTranscript(room.RoomID, entry)
+			transcript = append(transcript, entry)
+			ApplyRoleContribution(board, host, 0, fallback)
+		} else {
+			display := extractDebateDisplayContent(reply)
+			if strings.TrimSpace(display) == "" {
+				display = reply
+			}
+			_ = e.sendDebateRoleSpeech(ctx, room, host, display)
+			entry := DebateTranscriptEntry{
+				Round:     0,
+				Speaker:   host.Instance,
+				Role:      host.Role,
+				PostedBy:  host.Instance,
+				Content:   display,
+				LatencyMS: latency,
+			}
+			_ = e.debateStore.AppendTranscript(room.RoomID, entry)
+			transcript = append(transcript, entry)
+			ApplyRoleContribution(board, host, 0, reply)
 		}
-		display := extractDebateDisplayContent(reply)
-		if strings.TrimSpace(display) == "" {
-			display = reply
-		}
-		_ = e.sendDebateRoleSpeech(ctx, room, host, display)
-		entry := DebateTranscriptEntry{
-			Round:     0,
-			Speaker:   host.Instance,
-			Role:      host.Role,
-			PostedBy:  host.Instance,
-			Content:   display,
-			LatencyMS: latency,
-		}
-		_ = e.debateStore.AppendTranscript(room.RoomID, entry)
-		transcript = append(transcript, entry)
-		ApplyRoleContribution(board, host, 0, reply)
 		if board != nil {
 			board.RefinedTopic = topic
 			UpdateBlackboardWorkflow(board, DebateModeConsensus, consensusPhaseHostSeed, room.Iteration)
@@ -655,21 +666,119 @@ func (e *Engine) askDebateRole(ctx context.Context, room *DebateRoom, role Debat
 	if strings.TrimSpace(socketPath) == "" {
 		return "", 0, fmt.Errorf("socket path is empty")
 	}
+	timeoutSec := consensusAskTimeoutSecDefault
+	retry := consensusAskRetryDefault
+	if strings.EqualFold(role.Role, "jarvis") {
+		timeoutSec = consensusAskTimeoutSecHost
+		retry = consensusAskRetryHost
+	}
+
 	req := AskRequest{
-		Project:     emptyAs(role.Project, role.Instance),
-		SessionKey:  buildRoleSessionKey(room.OwnerSessionKey, room.GroupChatID, room.RoomID, role.Role),
-		Prompt:      flattenPromptForTransport(prompt),
-		TimeoutSec:  140,
-		Speak:       false,
-		SpeakPrefix: "",
+		Project:    emptyAs(role.Project, role.Instance),
+		SessionKey: buildRoleSessionKey(room.OwnerSessionKey, room.GroupChatID, room.RoomID, role.Role),
+		Speak:      false,
 	}
-	roleCtx, cancel := context.WithTimeout(ctx, 150*time.Second)
-	defer cancel()
-	res, err := e.instanceCli.Ask(roleCtx, socketPath, req)
-	if err != nil {
-		return "", 0, err
+
+	flatPrompt := flattenPromptForTransport(prompt)
+	lastErr := error(nil)
+	for attempt := 0; attempt <= retry; attempt++ {
+		req.Prompt = flatPrompt
+		req.TimeoutSec = timeoutSec
+		req.SpeakPrefix = ""
+
+		roleCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec+consensusAskContextExtraSec)*time.Second)
+		res, err := e.instanceCli.Ask(roleCtx, socketPath, req)
+		cancel()
+		if err == nil {
+			return strings.TrimSpace(res.Content), res.LatencyMS, nil
+		}
+		lastErr = err
+		if !isAskTimeoutErr(err) || attempt >= retry {
+			break
+		}
+		slog.Warn("debate: ask timeout, retrying",
+			"room_id", room.RoomID,
+			"role", role.Role,
+			"attempt", attempt+1,
+			"timeout_sec", timeoutSec,
+			"error", err)
+
+		// retry with condensed rescue prompt to reduce token and latency pressure.
+		flatPrompt = flattenPromptForTransport(buildTimeoutRescuePrompt(prompt))
+		timeoutSec += consensusAskRetryExtraTimeoutSec
 	}
-	return strings.TrimSpace(res.Content), res.LatencyMS, nil
+	return "", 0, lastErr
+}
+
+const (
+	consensusAskTimeoutSecDefault    = 180
+	consensusAskTimeoutSecHost       = 240
+	consensusAskRetryDefault         = 1
+	consensusAskRetryHost            = 1
+	consensusAskRetryExtraTimeoutSec = 60
+	consensusAskContextExtraSec      = 20
+)
+
+func isAskTimeoutErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "deadline exceeded") ||
+		strings.Contains(msg, "context deadline exceeded")
+}
+
+func buildTimeoutRescuePrompt(original string) string {
+	base := strings.TrimSpace(original)
+	if base == "" {
+		base = "请直接给出核心结论与行动项。"
+	}
+	var b strings.Builder
+	b.WriteString("你上一轮超时。请基于同一主题立即输出“可执行最小答案”，不要铺垫。\n")
+	b.WriteString("要求：\n")
+	b.WriteString("1) 直接给核心观点（2-4条）；\n")
+	b.WriteString("2) 给关键疑问（最多3条）；\n")
+	b.WriteString("3) 给下一步动作（owner+deadline+验收标准）。\n")
+	b.WriteString("4) 禁止菜单化语句。\n\n")
+	b.WriteString("原始任务：\n")
+	b.WriteString(truncateStr(base, 1200))
+	return b.String()
+}
+
+func buildConsensusHostSeedFallback(topic string, board *DebateBlackboard) string {
+	questions := []string{
+		"目标产物是否明确（方案/计划/代码）？",
+		"范围与非目标是否已锁定？",
+		"验收标准是否可量化？",
+	}
+	if board != nil && len(board.OpenQuestions) > 0 {
+		questions = board.OpenQuestions
+	}
+	var b strings.Builder
+	b.WriteString("【观点】\n")
+	b.WriteString(fmt.Sprintf("- 本轮先围绕主题“%s”建立可执行讨论框架：先对齐目标、范围、验收，再进入全员发散与收敛。\n", truncateStr(topic, 120)))
+	b.WriteString("- 讨论产出必须可落地：所有结论最终沉淀为行动项（owner + deadline + 验收标准）。\n")
+	b.WriteString("【依据】\n")
+	b.WriteString("- 先统一边界可显著减少后续分歧与返工。\n")
+	b.WriteString("- 先发散再收敛能提高方案覆盖面并保证最终一致性。\n")
+	b.WriteString("【风险/反例】\n")
+	b.WriteString("- 若边界未锁定，后续各角色会基于不同前提给出冲突建议。\n")
+	b.WriteString("- 若行动项缺 owner 与验收标准，讨论结论难执行。\n")
+	b.WriteString("【建议动作】\n")
+	b.WriteString("- 进入全员发散阶段：每位角色基于该主题提出观点、异议与疑问。\n")
+	b.WriteString("- 主持人下一步汇总已一致项与未一致项，并发起收敛轮。\n")
+	if len(questions) > 0 {
+		b.WriteString("- 待优先确认问题：")
+		for i := 0; i < minInt(3, len(questions)); i++ {
+			if i > 0 {
+				b.WriteString("；")
+			}
+			b.WriteString(truncateStr(strings.TrimSpace(questions[i]), 50))
+		}
+		b.WriteString("。\n")
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func (e *Engine) sendDebateRoleSpeech(ctx context.Context, room *DebateRoom, role DebateRole, displayContent string) error {
