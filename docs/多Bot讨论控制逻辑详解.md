@@ -102,7 +102,117 @@ sequenceDiagram
             R->>B: 写入 fallback 结果
             R->>T: 记录 transcript
         end
-    end
+end
+```
+
+### 3.1 时序图下的流程说明（文字版）
+
+系统从用户在群里发送 `/debate start ...` 开始，先由命令层创建讨论房间与黑板，然后启动后台 runner。  
+runner 读取 room 后，根据 `mode` 分流：
+
+- `classic`：按轮次选发言人，依次 Ask→Send→写黑板→写 transcript，最后统一总结。
+- `consensus`：按阶段状态机推进：澄清 → 主持人立论 → 全员发散 → 主持人收集 → 全员收敛（循环）→ 主持人总结。
+
+在 `consensus` 里，如果澄清信息不足，会进入 `waiting_input`，等待用户 `/debate answer`；  
+如果主持人立论阶段超时，不会直接失败，而是走兜底立论继续流程。  
+每次角色发言都会落盘 transcript，并把结构化观点写回 blackboard，供下一步收敛使用。  
+当未一致项清零后进入总结阶段，输出最终结论/风险/行动项并结束房间。
+
+---
+
+## 3.2 对应代码函数调用关系（简版）
+
+### A) 命令入口链路
+
+```text
+cmdDebate
+  └─ cmdDebateStart
+      ├─ parseDebateStartOptions
+      ├─ ValidateDebateStartOptions
+      ├─ NewDebateRoom
+      ├─ debateStore.SaveRoom
+      ├─ debateStore.LoadOrInitBlackboard
+      ├─ debateStore.AppendTranscript(room_created)
+      └─ startDebateRunner
+          └─ go runDebateRoom
+```
+
+### B) runner 分流链路
+
+```text
+runDebateRoom
+  ├─ debateStore.GetRoom
+  ├─ if room.Mode == consensus
+  │    └─ runConsensusDebateRoom
+  └─ else
+       └─ classic 轮次流程
+```
+
+### C) classic 模式核心链路
+
+```text
+for each round:
+  selectDebateSpeakers
+  for each speaker:
+    askDebateRole -> instanceCli.Ask
+    extractDebateDisplayContent
+    sendDebateRoleSpeech -> instanceCli.Send (失败降级 SendBySessionKey)
+    ApplyRoleContribution -> SaveBlackboard
+    AppendTranscript
+end
+finalizeDebateSummary
+```
+
+### D) consensus 模式阶段链路
+
+```text
+runConsensusDebateRoom
+  ├─ splitConsensusRoles
+  ├─ clarify_with_user
+  │    ├─ defaultClarifyQuestions
+  │    ├─ waiting_input (若未补充)
+  │    └─ /debate answer 后恢复
+  ├─ host_seed
+  │    ├─ askDebateRole(buildConsensusHostSeedPrompt)
+  │    └─ 超时/失败 -> buildConsensusHostSeedFallback
+  ├─ all_diverge
+  │    └─ askDebateRole(buildConsensusWorkerDivergePrompt) * workers
+  ├─ host_collect
+  │    ├─ askDebateRole(buildConsensusHostCollectPrompt)
+  │    └─ summarizeConsensusFromBoard
+  ├─ all_resolve (循环)
+  │    ├─ askDebateRole(buildConsensusWorkerResolvePrompt) * workers
+  │    ├─ askDebateRole(buildConsensusHostCheckPrompt)
+  │    ├─ summarizeConsensusFromBoard
+  │    └─ unresolved>0 && iteration<=max_rounds -> 下一轮
+  └─ host_finalize
+       └─ finalizeDebateSummary
+```
+
+### E) 单次发言通用链路
+
+```text
+askDebateRole
+  ├─ resolveRoleSocketPath
+  ├─ buildRoleSessionKey
+  ├─ instanceCli.Ask
+  ├─ timeout -> isAskTimeoutErr -> retry + buildTimeoutRescuePrompt
+  └─ 返回 content + latency
+
+sendDebateRoleSpeech
+  ├─ instanceCli.Send
+  └─ 失败降级：SendBySessionKey(owner)
+```
+
+### F) 总结与门禁链路
+
+```text
+finalizeDebateSummary
+  ├─ buildDebateSummary
+  ├─ AskSession(summary)
+  ├─ debateSummaryNeedsRepair
+  ├─ buildDebateSummaryRepairPrompt (必要时)
+  └─ fallbackDebateSummary (仍失败时)
 ```
 
 ---
@@ -174,4 +284,3 @@ sequenceDiagram
 3. 用 `/debate status + /debate board` 观察 `phase/unresolved`
 4. 若未收敛，继续 `/debate answer` 做拍板
 5. 等待 `host_finalize` + 总结输出
-
