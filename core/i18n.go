@@ -300,6 +300,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/stop\n  Stop current execution\n\n" +
 			"/cron [add|list|del|enable|disable]\n  Manage scheduled tasks\n\n" +
 			"/debate [start|status|board|stop|list]\n  Manage multi-role discussion rooms (M1 skeleton)\n\n" +
+			"/squad [start|approve-plan|status|stop|list]\n  Run dynamic 3-role pipeline (plan->execute->review)\n\n" +
 			"/status\n  Show system status\n\n" +
 			"/version\n  Show cc-connect version\n\n" +
 			"/help\n  Show this help\n\n" +
@@ -323,6 +324,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/stop\n  停止当前执行\n\n" +
 			"/cron [add|list|del|enable|disable]\n  管理定时任务\n\n" +
 			"/debate [start|status|board|stop|list]\n  管理多角色讨论房间（M1 骨架）\n\n" +
+			"/squad [start|approve-plan|status|stop|list]\n  动态三角色流水线（方案->执行->审核）\n\n" +
 			"/status\n  查看系统状态\n\n" +
 			"/version\n  查看 cc-connect 版本\n\n" +
 			"/help\n  显示此帮助\n\n" +

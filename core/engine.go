@@ -55,6 +55,10 @@ type Engine struct {
 	debateMu      sync.Mutex
 	debateRuns    map[string]context.CancelFunc
 	instanceCli   *LocalInstanceClient
+	squadStore    *SquadStore
+	squadMu       sync.Mutex
+	squadRuns     map[string]context.CancelFunc
+	squadProc     *SquadProcessManager
 
 	// When true, this engine will not execute normal agent tasks.
 	// It will still accept slash commands and background helpers (e.g. trace translation).
@@ -90,7 +94,8 @@ type pendingPermission struct {
 func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath string, lang Language) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
 	debateRoot := inferDebateStoreRoot(sessionStorePath, name)
-	return &Engine{
+	squadRoot := inferSquadStoreRoot(sessionStorePath, name)
+	e := &Engine{
 		name:              name,
 		agent:             ag,
 		platforms:         platforms,
@@ -104,7 +109,27 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		debateStore:       NewDebateStore(debateRoot),
 		debateRuns:        make(map[string]context.CancelFunc),
 		instanceCli:       NewLocalInstanceClient(),
+		squadStore:        NewSquadStore(squadRoot),
+		squadRuns:         make(map[string]context.CancelFunc),
+		squadProc:         NewSquadProcessManager(),
 	}
+	e.refreshSquadLatestRunIDLookup()
+	return e
+}
+
+func (e *Engine) refreshSquadLatestRunIDLookup() {
+	if e.squadStore == nil || !e.squadStore.Enabled() {
+		SetSquadLatestRunIDForOwnerLookup(nil)
+		return
+	}
+	st := e.squadStore
+	SetSquadLatestRunIDForOwnerLookup(func(sessionKey string) string {
+		id, err := st.LatestRunIDForOwner(sessionKey)
+		if err != nil {
+			return ""
+		}
+		return id
+	})
 }
 
 // SetSpeechConfig configures the speech-to-text subsystem.
@@ -139,6 +164,11 @@ func (e *Engine) SetCronScheduler(cs *CronScheduler) {
 
 func (e *Engine) SetDebateStore(store *DebateStore) {
 	e.debateStore = store
+}
+
+func (e *Engine) SetSquadStore(store *SquadStore) {
+	e.squadStore = store
+	e.refreshSquadLatestRunIDLookup()
 }
 
 func (e *Engine) SetInstanceClient(cli *LocalInstanceClient) {
@@ -227,6 +257,18 @@ func (e *Engine) Stop() error {
 		delete(e.debateRuns, roomID)
 	}
 	e.debateMu.Unlock()
+
+	e.squadMu.Lock()
+	for runID, cancel := range e.squadRuns {
+		if cancel != nil {
+			cancel()
+		}
+		delete(e.squadRuns, runID)
+	}
+	e.squadMu.Unlock()
+	if e.squadProc != nil {
+		e.squadProc.StopAll()
+	}
 
 	e.interactiveMu.Lock()
 	for key, state := range e.interactiveStates {
@@ -797,6 +839,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) {
 		e.reply(p, msg.ReplyCtx, VersionInfo)
 	case "/debate":
 		e.cmdDebate(p, msg, args)
+	case "/squad":
+		e.cmdSquad(p, msg, args)
 	default:
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf("Unknown command: %s\nType /help for available commands.", cmd))
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"regexp"
 	"strings"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -17,6 +18,8 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 )
+
+var feishuAtTagPattern = regexp.MustCompile(`(?is)<at\b[^>]*>.*?</at>`)
 
 func init() {
 	core.RegisterPlatform("feishu", New)
@@ -300,33 +303,107 @@ func (p *Platform) onCardAction(ctx context.Context, event *larkcb.CardActionTri
 	if val == nil {
 		return nil, nil
 	}
-
-	ccAction, _ := val["cc_action"].(string)
-	if ccAction != "menu_select" {
-		// Ignore other cards (not ours).
-		return nil, nil
-	}
-
-	choice, _ := val["choice"].(string)
-	choice = strings.ToLower(strings.TrimSpace(choice))
-
+	formValue := event.Event.Action.FormValue
+	ccAction := strings.ToLower(strings.TrimSpace(asStringAny(val["cc_action"])))
+	choice := strings.ToLower(strings.TrimSpace(asStringAny(val["choice"])))
 	var synthetic string
 	var toast string
-	switch choice {
-	case "tapd":
-		synthetic = "选择：TAPD（需求/缺陷/验收/回填）"
-		toast = "已选择 TAPD"
-	case "openspec":
-		synthetic = "选择：OpenSpec 发布到 HTTP（站点 / task-hub / memory）"
-		toast = "已选择 OpenSpec 发布"
-	case "unity":
-		synthetic = "选择：Unity / AGame（boss/场景/材质/shader/相机/AI/脚本报错）"
-		toast = "已选择 Unity / AGame"
-	case "dev":
-		synthetic = "选择：代码实现 / 调试 / 文档"
-		toast = "已选择 代码/文档"
+	switch ccAction {
+	case "menu_select":
+		switch choice {
+		case "tapd":
+			synthetic = "选择：TAPD（需求/缺陷/验收/回填）"
+			toast = "已选择 TAPD"
+		case "openspec":
+			synthetic = "选择：OpenSpec 发布到 HTTP（站点 / task-hub / memory）"
+			toast = "已选择 OpenSpec 发布"
+		case "unity":
+			synthetic = "选择：Unity / AGame（boss/场景/材质/shader/相机/AI/脚本报错）"
+			toast = "已选择 Unity / AGame"
+		case "dev":
+			synthetic = "选择：代码实现 / 调试 / 文档"
+			toast = "已选择 代码/文档"
+		case "debate_start_demo":
+			synthetic = "发起讨论模板：/debate start --mode consensus <原始话题>"
+			toast = "已发送发起讨论模板（请替换话题）"
+		case "debate_status":
+			synthetic = "/debate status"
+			toast = "正在查询讨论状态"
+		case "debate_board":
+			synthetic = "/debate board"
+			toast = "正在查询讨论黑板"
+		case "debate_list":
+			synthetic = "/debate list"
+			toast = "正在查询讨论房间"
+		case "debate_topic_tpl":
+			synthetic = "最终议题模板：/debate topic <room_id> <最终议题>"
+			toast = "已发送最终议题模板"
+		case "debate_participants_tpl":
+			synthetic = "选人模板：/debate participants <room_id> 1,2,3"
+			toast = "已发送选人模板"
+		case "debate_stop_tpl":
+			synthetic = "停止模板：/debate stop <room_id>"
+			toast = "已发送停止模板"
+		case "debate_control_card":
+			cardJSON := buildDebateControlCardJSON()
+			var sendErr error
+			// Prefer replying to the clicked card message (works in both group & p2p
+			// even when open_chat_id is absent in callback context).
+			if strings.TrimSpace(messageID) != "" {
+				sendErr = p.replyInteractiveCardByMessageID(ctx, messageID, cardJSON)
+			}
+			// Fallback: send a new message to chat when reply path is unavailable.
+			if sendErr != nil && strings.TrimSpace(chatID) != "" {
+				sendErr = p.sendInteractiveCardToChat(context.Background(), chatID, cardJSON)
+			}
+			if sendErr != nil {
+				slog.Error("feishu: send debate control card failed", "chat_id", chatID, "message_id", messageID, "error", sendErr)
+				toast = "打开讨论控制卡失败（请确认群权限/事件配置）"
+			} else {
+				toast = "已打开讨论控制卡"
+			}
+		case "squad_control_card":
+			sessionKey := fmt.Sprintf("feishu:%s:%s", chatID, userID)
+			cardJSON := buildSquadControlCardJSON(core.SquadLatestRunIDForOwnerSession(sessionKey))
+			var sendErr error
+			// Prefer replying to the clicked card message (works in both group & p2p
+			// even when open_chat_id is absent in callback context).
+			if strings.TrimSpace(messageID) != "" {
+				sendErr = p.replyInteractiveCardByMessageID(ctx, messageID, cardJSON)
+			}
+			// Fallback: send a new message to chat when reply path is unavailable.
+			if sendErr != nil && strings.TrimSpace(chatID) != "" {
+				sendErr = p.sendInteractiveCardToChat(context.Background(), chatID, cardJSON)
+			}
+			if sendErr != nil {
+				slog.Error("feishu: send squad control card failed", "chat_id", chatID, "message_id", messageID, "error", sendErr)
+				toast = "打开 Squad 控制卡失败（请确认群权限/事件配置）"
+			} else {
+				toast = "已打开 Squad 控制卡"
+			}
+		default:
+			toast = "未识别的选择"
+		}
+	case "debate_cmd":
+		cmd := strings.ToLower(strings.TrimSpace(asStringAny(val["cmd"])))
+		roomID := extractFormString(formValue, "room_id")
+		synthetic, toast = buildDebateCommandByAction(cmd, roomID)
+	case "debate_tpl":
+		tpl := strings.ToLower(strings.TrimSpace(asStringAny(val["tpl"])))
+		roomID := extractFormString(formValue, "room_id")
+		synthetic, toast = buildDebateTemplateByAction(tpl, roomID)
+	case "squad_cmd":
+		cmd := strings.ToLower(strings.TrimSpace(asStringAny(val["cmd"])))
+		runID := squadFormField(formValue, "run_id")
+		reworkNote := squadFormField(formValue, "rework_note")
+		synthetic, toast = buildSquadCommandByAction(cmd, runID, reworkNote)
+	case "squad_tpl":
+		tpl := strings.ToLower(strings.TrimSpace(asStringAny(val["tpl"])))
+		runID := squadFormField(formValue, "run_id")
+		synthetic, toast = buildSquadTemplateByAction(tpl, runID)
 	default:
-		toast = "未识别的选择"
+		// Ignore other cards/actions.
+		return nil, nil
 	}
 
 	// Feed selection back into the normal message pipeline so the agent can continue.
@@ -336,7 +413,7 @@ func (p *Platform) onCardAction(ctx context.Context, event *larkcb.CardActionTri
 		p.handler(p, &core.Message{
 			SessionKey: sessionKey, Platform: "feishu",
 			UserID: userID, UserName: "feishu_user",
-			Content: synthetic,
+			Content:  synthetic,
 			ReplyCtx: rctx,
 		})
 	}
@@ -354,7 +431,7 @@ func (p *Platform) onCardAction(ctx context.Context, event *larkcb.CardActionTri
 }
 
 func (p *Platform) shouldShowMenuCard(text string) bool {
-	t := strings.TrimSpace(text)
+	t := normalizeMenuTriggerText(text)
 	if t == "" {
 		return false
 	}
@@ -377,6 +454,33 @@ func (p *Platform) shouldShowMenuCard(text string) bool {
 	default:
 		return false
 	}
+}
+
+func normalizeMenuTriggerText(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	// Feishu group text often includes <at ...>name</at>; strip it first.
+	s = feishuAtTagPattern.ReplaceAllString(s, " ")
+
+	parts := strings.Fields(s)
+	clean := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		p = strings.Trim(p, "，,。.!?;；:：()[]{}<>《》\"'`“”‘’")
+		if p == "" {
+			continue
+		}
+		if strings.HasPrefix(p, "@") {
+			continue
+		}
+		clean = append(clean, p)
+	}
+	return strings.TrimSpace(strings.Join(clean, " "))
 }
 
 func (p *Platform) replyMenuCard(ctx context.Context, rc replyContext) error {
@@ -581,7 +685,7 @@ func buildMenuCardJSON() string {
 		"header": map[string]any{
 			"title": map[string]any{
 				"tag":     "plain_text",
-				"content": "快捷菜单（点按钮继续）",
+				"content": "快捷菜单（业务 + 多Bot讨论）",
 			},
 			"template": "blue",
 		},
@@ -636,6 +740,112 @@ func buildMenuCardJSON() string {
 				},
 			},
 			map[string]any{
+				"tag": "hr",
+			},
+			map[string]any{
+				"tag": "div",
+				"text": map[string]any{
+					"tag":     "lark_md",
+					"content": "**多Bot讨论快捷操作**",
+				},
+			},
+			map[string]any{
+				"tag": "action",
+				"actions": []any{
+					map[string]any{
+						"tag":  "button",
+						"type": "primary",
+						"text": map[string]any{"tag": "plain_text", "content": "发起讨论模板"},
+						"value": map[string]any{
+							"cc_action": "menu_select",
+							"choice":    "debate_start_demo",
+						},
+					},
+					map[string]any{
+						"tag":  "button",
+						"type": "default",
+						"text": map[string]any{"tag": "plain_text", "content": "讨论状态"},
+						"value": map[string]any{
+							"cc_action": "menu_select",
+							"choice":    "debate_status",
+						},
+					},
+					map[string]any{
+						"tag":  "button",
+						"type": "default",
+						"text": map[string]any{"tag": "plain_text", "content": "讨论黑板"},
+						"value": map[string]any{
+							"cc_action": "menu_select",
+							"choice":    "debate_board",
+						},
+					},
+					map[string]any{
+						"tag":  "button",
+						"type": "default",
+						"text": map[string]any{"tag": "plain_text", "content": "讨论列表"},
+						"value": map[string]any{
+							"cc_action": "menu_select",
+							"choice":    "debate_list",
+						},
+					},
+				},
+			},
+			map[string]any{
+				"tag": "action",
+				"actions": []any{
+					map[string]any{
+						"tag":  "button",
+						"type": "default",
+						"text": map[string]any{"tag": "plain_text", "content": "最终议题模板"},
+						"value": map[string]any{
+							"cc_action": "menu_select",
+							"choice":    "debate_topic_tpl",
+						},
+					},
+					map[string]any{
+						"tag":  "button",
+						"type": "default",
+						"text": map[string]any{"tag": "plain_text", "content": "选人模板"},
+						"value": map[string]any{
+							"cc_action": "menu_select",
+							"choice":    "debate_participants_tpl",
+						},
+					},
+					map[string]any{
+						"tag":  "button",
+						"type": "default",
+						"text": map[string]any{"tag": "plain_text", "content": "停止模板"},
+						"value": map[string]any{
+							"cc_action": "menu_select",
+							"choice":    "debate_stop_tpl",
+						},
+					},
+					map[string]any{
+						"tag":  "button",
+						"type": "default",
+						"text": map[string]any{"tag": "plain_text", "content": "讨论控制卡"},
+						"value": map[string]any{
+							"cc_action": "menu_select",
+							"choice":    "debate_control_card",
+						},
+					},
+				},
+			},
+			map[string]any{
+				"tag": "action",
+				"actions": []any{
+					map[string]any{
+						"tag":  "button",
+						"type": "primary",
+						"text": map[string]any{"tag": "plain_text", "content": "Squad 审核控制卡"},
+						"value": map[string]any{
+							"cc_action": "menu_select",
+							"choice":    "squad_control_card",
+						},
+					},
+				},
+			},
+			map[string]any{
 				"tag": "div",
 				"text": map[string]any{
 					"tag":     "lark_md",
@@ -647,6 +857,532 @@ func buildMenuCardJSON() string {
 
 	b, _ := json.Marshal(card)
 	return string(b)
+}
+
+func buildDebateControlCardJSON() string {
+	card := map[string]any{
+		"config": map[string]any{
+			"wide_screen_mode": true,
+		},
+		"header": map[string]any{
+			"title": map[string]any{
+				"tag":     "plain_text",
+				"content": "多Bot讨论控制卡",
+			},
+			"template": "purple",
+		},
+		"elements": []any{
+			map[string]any{
+				"tag": "div",
+				"text": map[string]any{
+					"tag": "lark_md",
+					"content": "在下方输入 room_id（可选），然后点击按钮执行。\n" +
+						"- 不填 room_id：默认执行无参命令（如 /debate status）\n" +
+						"- 填写 room_id：优先执行带房间命令",
+				},
+			},
+			map[string]any{
+				"tag":  "input",
+				"name": "room_id",
+				"label": map[string]any{
+					"tag":     "plain_text",
+					"content": "Room ID（可选）",
+				},
+				"placeholder": map[string]any{
+					"tag":     "plain_text",
+					"content": "debate_20260320_xxx",
+				},
+			},
+			map[string]any{
+				"tag": "action",
+				"actions": []any{
+					map[string]any{
+						"tag":  "button",
+						"type": "primary",
+						"text": map[string]any{"tag": "plain_text", "content": "状态"},
+						"value": map[string]any{
+							"cc_action": "debate_cmd",
+							"cmd":       "status",
+						},
+					},
+					map[string]any{
+						"tag":  "button",
+						"type": "default",
+						"text": map[string]any{"tag": "plain_text", "content": "黑板"},
+						"value": map[string]any{
+							"cc_action": "debate_cmd",
+							"cmd":       "board",
+						},
+					},
+					map[string]any{
+						"tag":  "button",
+						"type": "default",
+						"text": map[string]any{"tag": "plain_text", "content": "列表"},
+						"value": map[string]any{
+							"cc_action": "debate_cmd",
+							"cmd":       "list",
+						},
+					},
+					map[string]any{
+						"tag":  "button",
+						"type": "danger",
+						"text": map[string]any{"tag": "plain_text", "content": "停止"},
+						"value": map[string]any{
+							"cc_action": "debate_cmd",
+							"cmd":       "stop",
+						},
+					},
+				},
+			},
+			map[string]any{
+				"tag": "hr",
+			},
+			map[string]any{
+				"tag": "div",
+				"text": map[string]any{
+					"tag":     "lark_md",
+					"content": "**一键填充命令模板**（会把 room_id 自动带入，未填则保留 ROOM_ID 占位）",
+				},
+			},
+			map[string]any{
+				"tag": "action",
+				"actions": []any{
+					map[string]any{
+						"tag":  "button",
+						"type": "default",
+						"text": map[string]any{"tag": "plain_text", "content": "最终议题模板"},
+						"value": map[string]any{
+							"cc_action": "debate_tpl",
+							"tpl":       "topic",
+						},
+					},
+					map[string]any{
+						"tag":  "button",
+						"type": "default",
+						"text": map[string]any{"tag": "plain_text", "content": "满意模板"},
+						"value": map[string]any{
+							"cc_action": "debate_tpl",
+							"tpl":       "approve",
+						},
+					},
+					map[string]any{
+						"tag":  "button",
+						"type": "default",
+						"text": map[string]any{"tag": "plain_text", "content": "不满意模板"},
+						"value": map[string]any{
+							"cc_action": "debate_tpl",
+							"tpl":       "reject",
+						},
+					},
+					map[string]any{
+						"tag":  "button",
+						"type": "default",
+						"text": map[string]any{"tag": "plain_text", "content": "选人模板"},
+						"value": map[string]any{
+							"cc_action": "debate_tpl",
+							"tpl":       "participants",
+						},
+					},
+				},
+			},
+			map[string]any{
+				"tag": "action",
+				"actions": []any{
+					map[string]any{
+						"tag":  "button",
+						"type": "default",
+						"text": map[string]any{"tag": "plain_text", "content": "发起讨论模板"},
+						"value": map[string]any{
+							"cc_action": "debate_tpl",
+							"tpl":       "start",
+						},
+					},
+				},
+			},
+		},
+	}
+	b, _ := json.Marshal(card)
+	return string(b)
+}
+
+func buildSquadControlCardJSON(defaultRunID string) string {
+	defaultRunID = strings.TrimSpace(defaultRunID)
+	if len(defaultRunID) > 240 {
+		defaultRunID = defaultRunID[:240]
+	}
+
+	squadV2Callback := func(val map[string]any) []any {
+		return []any{map[string]any{"type": "callback", "value": val}}
+	}
+	squadV2SubmitBtn := func(name, btnType, label string, val map[string]any) map[string]any {
+		return map[string]any{
+			"tag":              "button",
+			"name":             name,
+			"type":             btnType,
+			"text":             map[string]any{"tag": "plain_text", "content": label},
+			"form_action_type": "submit",
+			"behaviors":        squadV2Callback(val),
+		}
+	}
+	squadV2Col := func(width string, elems ...any) map[string]any {
+		return map[string]any{
+			"tag":            "column",
+			"width":          width,
+			"vertical_align": "top",
+			"elements":       elems,
+		}
+	}
+	squadV2Row := func(cols ...map[string]any) map[string]any {
+		return map[string]any{
+			"tag":                "column_set",
+			"flex_mode":          "flow",
+			"background_style":   "default",
+			"horizontal_spacing": "medium",
+			"columns":            cols,
+		}
+	}
+
+	intro := "**Squad 审核（JSON 2.0 表单）**\n\n" +
+		"在下方填写 **Run ID** 后，点击按钮将**整表提交**（飞书要求带输入的卡片使用表单提交）。\n" +
+		"Run ID 已按你在本实例下**最近一次更新的 Squad 运行**自动预填；可改。\n" +
+		"裁决返工前请在第二栏填写原因与修改方案。"
+
+	formElements := []any{
+		map[string]any{
+			"tag":           "input",
+			"element_id":    "el_sq_run",
+			"name":          "run_id",
+			"width":         "fill",
+			"label":         map[string]any{"tag": "plain_text", "content": "Run ID"},
+			"placeholder":   map[string]any{"tag": "plain_text", "content": "squad_20260321_xxx"},
+			"default_value": defaultRunID,
+			"required":      false,
+			"max_length":    400,
+		},
+		map[string]any{
+			"tag":           "input",
+			"element_id":    "el_sq_note",
+			"name":          "rework_note",
+			"input_type":    "multiline_text",
+			"rows":          3,
+			"width":         "fill",
+			"label":         map[string]any{"tag": "plain_text", "content": "返工或跳过说明"},
+			"placeholder":   map[string]any{"tag": "plain_text", "content": "问题与修改方案，或跳过理由"},
+			"default_value": "",
+			"required":      false,
+			"max_length":    1000,
+		},
+		squadV2Row(
+			squadV2Col("auto", squadV2SubmitBtn("sq_btn_list", "default", "运行列表", map[string]any{"cc_action": "squad_cmd", "cmd": "list"})),
+			squadV2Col("auto", squadV2SubmitBtn("sq_btn_stat", "default", "状态", map[string]any{"cc_action": "squad_cmd", "cmd": "status"})),
+			squadV2Col("auto", squadV2SubmitBtn("sq_btn_plan", "default", "查看计划", map[string]any{"cc_action": "squad_cmd", "cmd": "show_plan"})),
+			squadV2Col("auto", squadV2SubmitBtn("sq_btn_task", "default", "查看任务", map[string]any{"cc_action": "squad_cmd", "cmd": "show_task"})),
+		),
+		squadV2Row(
+			squadV2Col("auto", squadV2SubmitBtn("sq_btn_aplan", "primary", "批准计划", map[string]any{"cc_action": "squad_cmd", "cmd": "approve_plan"})),
+			squadV2Col("auto", squadV2SubmitBtn("sq_btn_atask", "primary", "批准任务", map[string]any{"cc_action": "squad_cmd", "cmd": "approve_task"})),
+			squadV2Col("auto", squadV2SubmitBtn("sq_btn_skip", "default", "跳过任务", map[string]any{"cc_action": "squad_cmd", "cmd": "skip_task"})),
+		),
+		squadV2Row(
+			squadV2Col("auto", squadV2SubmitBtn("sq_btn_jpass", "primary", "裁决通过", map[string]any{"cc_action": "squad_cmd", "cmd": "judge_pass"})),
+			squadV2Col("auto", squadV2SubmitBtn("sq_btn_jrework", "danger", "裁决返工", map[string]any{"cc_action": "squad_cmd", "cmd": "judge_rework"})),
+		),
+		map[string]any{
+			"tag":        "hr",
+			"element_id": "sq_div_1",
+			"margin":     "8px 0",
+		},
+		map[string]any{
+			"tag":         "markdown",
+			"element_id":  "sq_tpl_hint",
+			"content":     "**一键模板**（提交时带入当前 Run ID；未填则用 RUN_ID 占位）",
+			"text_align":  "left",
+			"text_size":   "normal",
+		},
+		squadV2Row(
+			squadV2Col("auto", squadV2SubmitBtn("sq_tpl_start", "default", "启动模板", map[string]any{"cc_action": "squad_tpl", "tpl": "start"})),
+			squadV2Col("auto", squadV2SubmitBtn("sq_tpl_aplan", "default", "计划确认", map[string]any{"cc_action": "squad_tpl", "tpl": "approve_plan"})),
+			squadV2Col("auto", squadV2SubmitBtn("sq_tpl_atask", "default", "任务确认", map[string]any{"cc_action": "squad_tpl", "tpl": "approve_task"})),
+		),
+		squadV2Row(
+			squadV2Col("auto", squadV2SubmitBtn("sq_tpl_skip", "default", "跳过模板", map[string]any{"cc_action": "squad_tpl", "tpl": "skip_task"})),
+			squadV2Col("auto", squadV2SubmitBtn("sq_tpl_jrw", "default", "返工模板", map[string]any{"cc_action": "squad_tpl", "tpl": "judge_rework"})),
+		),
+	}
+
+	card := map[string]any{
+		"schema": "2.0",
+		"config": map[string]any{
+			"update_multi": true,
+			"width_mode":   "fill",
+		},
+		"header": map[string]any{
+			"template": "green",
+			"title": map[string]any{
+				"tag":     "plain_text",
+				"content": "Squad 审核控制卡",
+			},
+		},
+		"body": map[string]any{
+			"elements": []any{
+				map[string]any{
+					"tag":         "markdown",
+					"element_id":  "sq_intro",
+					"content":     intro,
+					"text_align":  "left",
+					"text_size":   "normal",
+				},
+				map[string]any{
+					"tag":        "form",
+					"element_id": "sq_form",
+					"name":       "squad_main_form",
+					"elements":   formElements,
+				},
+			},
+		},
+	}
+	b, _ := json.Marshal(card)
+	return string(b)
+}
+
+func (p *Platform) sendInteractiveCardToChat(ctx context.Context, chatID, cardJSON string) error {
+	chatID = strings.TrimSpace(chatID)
+	cardJSON = strings.TrimSpace(cardJSON)
+	if chatID == "" {
+		return fmt.Errorf("feishu: chatID is empty, cannot send interactive card")
+	}
+	if cardJSON == "" {
+		return fmt.Errorf("feishu: card content is empty")
+	}
+	resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(chatID).
+			MsgType(larkim.MsgTypeInteractive).
+			Content(cardJSON).
+			Build()).
+		Build())
+	if err != nil {
+		return fmt.Errorf("feishu: send interactive card api call: %w", err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("feishu: send interactive card failed code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	return nil
+}
+
+func (p *Platform) replyInteractiveCardByMessageID(ctx context.Context, messageID, cardJSON string) error {
+	messageID = strings.TrimSpace(messageID)
+	cardJSON = strings.TrimSpace(cardJSON)
+	if messageID == "" {
+		return fmt.Errorf("feishu: messageID is empty, cannot reply interactive card")
+	}
+	if cardJSON == "" {
+		return fmt.Errorf("feishu: card content is empty")
+	}
+	resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
+		MessageId(messageID).
+		Body(larkim.NewReplyMessageReqBodyBuilder().
+			MsgType(larkim.MsgTypeInteractive).
+			Content(cardJSON).
+			Build()).
+		Build())
+	if err != nil {
+		return fmt.Errorf("feishu: reply interactive card api call: %w", err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("feishu: reply interactive card failed code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	return nil
+}
+
+func asStringAny(v interface{}) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	default:
+		return ""
+	}
+}
+
+func extractFormString(form map[string]interface{}, key string) string {
+	if len(form) == 0 || strings.TrimSpace(key) == "" {
+		return ""
+	}
+	v, ok := form[key]
+	if !ok || v == nil {
+		return ""
+	}
+	switch x := v.(type) {
+	case string:
+		return strings.TrimSpace(x)
+	case map[string]interface{}:
+		if inner, ok := x["value"]; ok {
+			return strings.TrimSpace(asStringAny(inner))
+		}
+	case []interface{}:
+		if len(x) > 0 {
+			return strings.TrimSpace(asStringAny(x[0]))
+		}
+	}
+	return ""
+}
+
+// squadFormField reads a named field from card form_value (JSON 1.0 flat map or 2.0 nested maps).
+func squadFormField(form map[string]interface{}, key string) string {
+	if s := extractFormString(form, key); s != "" {
+		return s
+	}
+	for _, v := range form {
+		nested, ok := v.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if s := extractFormString(nested, key); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func buildDebateCommandByAction(cmd, roomID string) (string, string) {
+	roomID = strings.TrimSpace(roomID)
+	switch strings.ToLower(strings.TrimSpace(cmd)) {
+	case "status":
+		if roomID != "" {
+			return "/debate status " + roomID, "正在查询讨论状态"
+		}
+		return "/debate status", "正在查询讨论状态"
+	case "board":
+		if roomID != "" {
+			return "/debate board " + roomID, "正在查询讨论黑板"
+		}
+		return "/debate board", "正在查询讨论黑板"
+	case "list":
+		return "/debate list", "正在查询讨论房间"
+	case "stop":
+		if roomID != "" {
+			return "/debate stop " + roomID, "正在停止讨论"
+		}
+		return "停止模板：/debate stop <room_id>", "请先填写 room_id 后再停止"
+	default:
+		return "", "未识别的讨论命令"
+	}
+}
+
+func buildDebateTemplateByAction(tpl, roomID string) (string, string) {
+	roomID = strings.TrimSpace(roomID)
+	withRoom := roomID
+	if withRoom == "" {
+		withRoom = "<room_id>"
+	}
+	switch strings.ToLower(strings.TrimSpace(tpl)) {
+	case "topic":
+		return fmt.Sprintf("最终议题模板：/debate topic %s <最终议题>", withRoom), "已发送最终议题模板"
+	case "approve":
+		return fmt.Sprintf("满意模板：/debate decision %s approve <可选反馈>", withRoom), "已发送满意模板"
+	case "reject":
+		return fmt.Sprintf("不满意模板：/debate decision %s reject <反馈>", withRoom), "已发送不满意模板"
+	case "participants":
+		return fmt.Sprintf("选人模板：/debate participants %s 1,2,3", withRoom), "已发送选人模板"
+	case "start":
+		return "/debate start --mode consensus <原始话题>", "已发送发起讨论模板"
+	default:
+		return "", "未识别的模板动作"
+	}
+}
+
+func buildSquadCommandByAction(cmd, runID, reworkNote string) (string, string) {
+	runID = strings.TrimSpace(runID)
+	reworkNote = strings.TrimSpace(strings.Join(strings.Fields(reworkNote), " "))
+	requireRunID := func() (string, string, bool) {
+		if runID == "" {
+			return "", "请先填写 run_id", false
+		}
+		return runID, "", true
+	}
+	switch strings.ToLower(strings.TrimSpace(cmd)) {
+	case "list":
+		return "/squad list", "正在查询 Squad 运行列表"
+	case "status":
+		id, tip, ok := requireRunID()
+		if !ok {
+			return "run_id 示例：squad_20260321_xxx", tip
+		}
+		return "/squad status " + id, "正在查询 Squad 状态"
+	case "show_plan":
+		id, tip, ok := requireRunID()
+		if !ok {
+			return "run_id 示例：squad_20260321_xxx", tip
+		}
+		return "/squad show-plan " + id, "正在查询 Squad 计划"
+	case "show_task":
+		id, tip, ok := requireRunID()
+		if !ok {
+			return "run_id 示例：squad_20260321_xxx", tip
+		}
+		return "/squad show-task " + id + " current", "正在查询当前任务"
+	case "approve_plan":
+		id, tip, ok := requireRunID()
+		if !ok {
+			return "run_id 示例：squad_20260321_xxx", tip
+		}
+		return "/squad approve-plan " + id, "正在批准计划"
+	case "approve_task":
+		id, tip, ok := requireRunID()
+		if !ok {
+			return "run_id 示例：squad_20260321_xxx", tip
+		}
+		return "/squad approve-task " + id + " current", "正在批准当前任务"
+	case "skip_task":
+		id, tip, ok := requireRunID()
+		if !ok {
+			return "run_id 示例：squad_20260321_xxx", tip
+		}
+		if reworkNote != "" {
+			return "/squad skip-task " + id + " " + reworkNote, "已发送跳过任务命令"
+		}
+		return "/squad skip-task " + id + " 用户手动跳过", "已发送跳过任务命令"
+	case "judge_pass":
+		id, tip, ok := requireRunID()
+		if !ok {
+			return "run_id 示例：squad_20260321_xxx", tip
+		}
+		return "/squad judge-review " + id + " pass", "已发送通过裁决"
+	case "judge_rework":
+		id, tip, ok := requireRunID()
+		if !ok {
+			return "run_id 示例：squad_20260321_xxx", tip
+		}
+		if reworkNote == "" {
+			return "请先填写不通过原因与修改方案，然后再点击“裁决返工”", "返工信息为空"
+		}
+		return "/squad judge-review " + id + " rework " + reworkNote, "已发送返工裁决"
+	default:
+		return "", "未识别的 Squad 命令"
+	}
+}
+
+func buildSquadTemplateByAction(tpl, runID string) (string, string) {
+	runID = strings.TrimSpace(runID)
+	withRun := runID
+	if withRun == "" {
+		withRun = "RUN_ID"
+	}
+	switch strings.ToLower(strings.TrimSpace(tpl)) {
+	case "start":
+		return "启动模板：/squad start --repo D:\\\\your-repo --planner jarvis --executor xingzou --reviewer jianzhu --provider codez <需求>", "已发送启动模板"
+	case "approve_plan":
+		return "/squad approve-plan " + withRun, "已发送计划确认模板"
+	case "approve_task":
+		return "/squad approve-task " + withRun + " current", "已发送任务确认模板"
+	case "skip_task":
+		return "/squad skip-task " + withRun + " 暂不需要该任务，先跳过", "已发送跳过任务模板"
+	case "judge_rework":
+		return "/squad judge-review " + withRun + " rework 不通过原因：...；修改方案：1)... 2)...", "已发送返工裁决模板"
+	default:
+		return "", "未识别的 Squad 模板动作"
+	}
 }
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {

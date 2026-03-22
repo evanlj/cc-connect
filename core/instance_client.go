@@ -14,6 +14,11 @@ import (
 
 type LocalInstanceClient struct{}
 
+const (
+	defaultAskHTTPTimeout = 5 * time.Minute
+	askHTTPTimeoutBuffer  = 30 * time.Second
+)
+
 func NewLocalInstanceClient() *LocalInstanceClient {
 	return &LocalInstanceClient{}
 }
@@ -31,7 +36,7 @@ func (c *LocalInstanceClient) Ask(ctx context.Context, socketPath string, req As
 	}
 
 	httpClient := &http.Client{
-		Timeout: 5 * time.Minute,
+		Timeout: resolveAskHTTPTimeout(req.TimeoutSec),
 		Transport: &http.Transport{
 			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
 				return net.Dial("unix", socketPath)
@@ -70,6 +75,17 @@ func (c *LocalInstanceClient) Ask(ctx context.Context, socketPath string, req As
 	out.LatencyMS = raw.LatencyMS
 	out.ToolCount = raw.ToolCount
 	return out, nil
+}
+
+func resolveAskHTTPTimeout(reqTimeoutSec int) time.Duration {
+	timeout := defaultAskHTTPTimeout
+	if reqTimeoutSec > 0 {
+		candidate := time.Duration(reqTimeoutSec)*time.Second + askHTTPTimeoutBuffer
+		if candidate > timeout {
+			timeout = candidate
+		}
+	}
+	return timeout
 }
 
 func (c *LocalInstanceClient) Send(ctx context.Context, socketPath string, req SendRequest) error {
