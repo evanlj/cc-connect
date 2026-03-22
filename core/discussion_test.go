@@ -15,6 +15,8 @@ func TestParseDebateStartOptions(t *testing.T) {
 			"--preset", "tianji-five",
 			"--rounds", "4",
 			"--speaking-policy", "host-decide",
+			"--host", "jarvis",
+			"--participants", "jianzhu,wendan",
 			"如何",
 			"实现",
 			"单机多机器人讨论",
@@ -33,6 +35,12 @@ func TestParseDebateStartOptions(t *testing.T) {
 		}
 		if opts.SpeakingPolicy != "host-decide" {
 			t.Fatalf("policy mismatch: %q", opts.SpeakingPolicy)
+		}
+		if opts.HostRole != "jarvis" {
+			t.Fatalf("host role mismatch: %q", opts.HostRole)
+		}
+		if len(opts.Participants) != 2 || opts.Participants[0] != "jianzhu" || opts.Participants[1] != "wendan" {
+			t.Fatalf("participants mismatch: %+v", opts.Participants)
 		}
 		if opts.Question != "如何 实现 单机多机器人讨论" {
 			t.Fatalf("question mismatch: %q", opts.Question)
@@ -241,5 +249,45 @@ func TestNormalizeDebateQuestionStripFeishuAtTag(t *testing.T) {
 	want := "请讨论：如何把需求拆成可并行执行的任务"
 	if got != want {
 		t.Fatalf("normalize feishu at mismatch:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestDebateStoreSaveFinalReport(t *testing.T) {
+	store := NewDebateStore(t.TempDir())
+	path, err := store.SaveFinalReport("debate_20260319_100000_000001", "# 报告\n\n内容")
+	if err != nil {
+		t.Fatalf("SaveFinalReport err: %v", err)
+	}
+	if path == "" {
+		t.Fatal("report path should not be empty")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read report err: %v", err)
+	}
+	if !strings.Contains(string(b), "内容") {
+		t.Fatalf("report content mismatch: %s", string(b))
+	}
+}
+
+func TestParseParticipantSelectionByIndex(t *testing.T) {
+	room := &DebateRoom{
+		HostRole: "jarvis",
+		Roles: []DebateRole{
+			{Role: "jarvis", DisplayName: "Jarvis"},
+			{Role: "jianzhu", DisplayName: "剑主"},
+			{Role: "wendan", DisplayName: "文胆"},
+			{Role: "xingzou", DisplayName: "行走"},
+		},
+	}
+	requested, confirmed, err := parseParticipantSelection(room, "1,3")
+	if err != nil {
+		t.Fatalf("parseParticipantSelection err: %v", err)
+	}
+	if len(requested) != 2 || requested[0] != "1" || requested[1] != "3" {
+		t.Fatalf("requested mismatch: %+v", requested)
+	}
+	if len(confirmed) != 2 || confirmed[0] != "jianzhu" || confirmed[1] != "xingzou" {
+		t.Fatalf("confirmed mismatch: %+v", confirmed)
 	}
 }

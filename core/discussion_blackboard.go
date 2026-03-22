@@ -29,28 +29,36 @@ type DebateRoleNote struct {
 // 2) accumulate each role's latest structured points;
 // 3) provide a stable context snapshot for the next speaker prompt.
 type DebateBlackboard struct {
-	RoomID          string                    `json:"room_id"`
-	Mode            string                    `json:"mode,omitempty"`
-	Phase           string                    `json:"phase,omitempty"`
-	Iteration       int                       `json:"iteration,omitempty"`
-	Topic           string                    `json:"topic"`
-	RefinedTopic    string                    `json:"refined_topic,omitempty"`
-	Goal            string                    `json:"goal"`
-	Constraints     []string                  `json:"constraints,omitempty"`
-	ExpectedOutput  []string                  `json:"expected_output,omitempty"`
-	Round           int                       `json:"round"`
-	MaxRounds       int                       `json:"max_rounds"`
-	RoundPlan       string                    `json:"round_plan,omitempty"`
-	RoundFocus      string                    `json:"round_focus,omitempty"`
-	OpenQuestions   []string                  `json:"open_questions,omitempty"`
-	ConsensusPoints []string                  `json:"consensus_points,omitempty"`
-	Unresolved      []string                  `json:"unresolved,omitempty"`
-	HistoryDigest   []string                  `json:"history_digest,omitempty"`
-	RoleNotes       map[string]DebateRoleNote `json:"role_notes,omitempty"`
-	Revision        int                       `json:"revision"`
-	CreatedAt       time.Time                 `json:"created_at"`
-	UpdatedAt       time.Time                 `json:"updated_at"`
-	LastContributor string                    `json:"last_contributor,omitempty"`
+	RoomID                 string                    `json:"room_id"`
+	Mode                   string                    `json:"mode,omitempty"`
+	Phase                  string                    `json:"phase,omitempty"`
+	Iteration              int                       `json:"iteration,omitempty"`
+	Topic                  string                    `json:"topic"`
+	TopicDraft             string                    `json:"topic_draft,omitempty"`
+	RefinedTopic           string                    `json:"refined_topic,omitempty"`
+	FinalTopicLocked       bool                      `json:"final_topic_locked,omitempty"`
+	HostFirstProposal      string                    `json:"host_first_proposal,omitempty"`
+	HostFirstProposalRisks []string                  `json:"host_first_proposal_risks,omitempty"`
+	UserReviewStatus       string                    `json:"user_review_status,omitempty"`
+	UserReviewFeedback     string                    `json:"user_review_feedback,omitempty"`
+	ParticipantCandidates  []string                  `json:"participant_candidates,omitempty"`
+	ParticipantConfirmed   []string                  `json:"participant_confirmed,omitempty"`
+	Goal                   string                    `json:"goal"`
+	Constraints            []string                  `json:"constraints,omitempty"`
+	ExpectedOutput         []string                  `json:"expected_output,omitempty"`
+	Round                  int                       `json:"round"`
+	MaxRounds              int                       `json:"max_rounds"`
+	RoundPlan              string                    `json:"round_plan,omitempty"`
+	RoundFocus             string                    `json:"round_focus,omitempty"`
+	OpenQuestions          []string                  `json:"open_questions,omitempty"`
+	ConsensusPoints        []string                  `json:"consensus_points,omitempty"`
+	Unresolved             []string                  `json:"unresolved,omitempty"`
+	HistoryDigest          []string                  `json:"history_digest,omitempty"`
+	RoleNotes              map[string]DebateRoleNote `json:"role_notes,omitempty"`
+	Revision               int                       `json:"revision"`
+	CreatedAt              time.Time                 `json:"created_at"`
+	UpdatedAt              time.Time                 `json:"updated_at"`
+	LastContributor        string                    `json:"last_contributor,omitempty"`
 }
 
 // RoleContribution is parsed from one role's reply and written back to the blackboard.
@@ -154,6 +162,7 @@ func (s *DebateStore) LoadOrInitBlackboard(room *DebateRoom) (*DebateBlackboard,
 		return nil, fmt.Errorf("room is nil")
 	}
 	if b, err := s.LoadBlackboard(room.RoomID); err == nil {
+		syncBlackboardWithRoom(b, room)
 		return b, nil
 	} else if !os.IsNotExist(err) {
 		return nil, err
@@ -161,14 +170,20 @@ func (s *DebateStore) LoadOrInitBlackboard(room *DebateRoom) (*DebateBlackboard,
 
 	now := time.Now()
 	board := &DebateBlackboard{
-		RoomID:       room.RoomID,
-		Mode:         emptyAs(strings.ToLower(strings.TrimSpace(room.Mode)), DebateModeClassic),
-		Phase:        emptyAs(strings.TrimSpace(room.Phase), "init"),
-		Iteration:    room.Iteration,
-		Topic:        strings.TrimSpace(room.Question),
-		RefinedTopic: strings.TrimSpace(room.RefinedQuestion),
-		Goal:         "围绕讨论主题形成可执行结论与行动项（含责任人和验收标准）。",
-		Constraints:  []string{"多角色协作", "结论可执行", "建议可验证"},
+		RoomID:                room.RoomID,
+		Mode:                  emptyAs(strings.ToLower(strings.TrimSpace(room.Mode)), DebateModeClassic),
+		Phase:                 emptyAs(strings.TrimSpace(room.Phase), "init"),
+		Iteration:             room.Iteration,
+		Topic:                 strings.TrimSpace(room.Question),
+		TopicDraft:            strings.TrimSpace(room.TopicDraft),
+		RefinedTopic:          strings.TrimSpace(room.RefinedQuestion),
+		FinalTopicLocked:      strings.TrimSpace(room.RefinedQuestion) != "",
+		UserReviewStatus:      strings.TrimSpace(room.UserReviewStatus),
+		UserReviewFeedback:    strings.TrimSpace(room.UserReviewFeedback),
+		ParticipantCandidates: cloneStringSlice(room.RequestedParticipants),
+		ParticipantConfirmed:  cloneStringSlice(room.ConfirmedParticipants),
+		Goal:                  "围绕讨论主题形成可执行结论与行动项（含责任人和验收标准）。",
+		Constraints:           []string{"多角色协作", "结论可执行", "建议可验证"},
 		ExpectedOutput: []string{
 			"关键结论（3条内）",
 			"主要风险（3条内）",
@@ -184,6 +199,9 @@ func (s *DebateStore) LoadOrInitBlackboard(room *DebateRoom) (*DebateBlackboard,
 		Revision:      1,
 		CreatedAt:     now,
 		UpdatedAt:     now,
+	}
+	if len(board.ParticipantCandidates) == 0 && len(room.Roles) > 0 {
+		board.ParticipantCandidates = defaultConsensusParticipantCandidates(room)
 	}
 	if err := s.SaveBlackboard(board); err != nil {
 		return nil, err
@@ -336,6 +354,66 @@ func extractQuestions(text string) []string {
 		}
 		seen[q] = true
 		out = append(out, q)
+	}
+	return out
+}
+
+func syncBlackboardWithRoom(board *DebateBlackboard, room *DebateRoom) {
+	if board == nil || room == nil {
+		return
+	}
+	if strings.TrimSpace(board.Topic) == "" {
+		board.Topic = strings.TrimSpace(room.Question)
+	}
+	if strings.TrimSpace(room.TopicDraft) != "" {
+		board.TopicDraft = strings.TrimSpace(room.TopicDraft)
+	}
+	if strings.TrimSpace(room.RefinedQuestion) != "" {
+		board.RefinedTopic = strings.TrimSpace(room.RefinedQuestion)
+		board.FinalTopicLocked = true
+	}
+	if strings.TrimSpace(room.Phase) != "" {
+		board.Phase = strings.TrimSpace(room.Phase)
+	}
+	if strings.TrimSpace(room.Mode) != "" {
+		board.Mode = strings.ToLower(strings.TrimSpace(room.Mode))
+	}
+	if room.Iteration >= 0 {
+		board.Iteration = room.Iteration
+	}
+	if strings.TrimSpace(room.UserReviewStatus) != "" {
+		board.UserReviewStatus = strings.TrimSpace(room.UserReviewStatus)
+	}
+	if strings.TrimSpace(room.UserReviewFeedback) != "" {
+		board.UserReviewFeedback = strings.TrimSpace(room.UserReviewFeedback)
+	}
+	if len(room.RequestedParticipants) > 0 && len(board.ParticipantCandidates) == 0 {
+		board.ParticipantCandidates = cloneStringSlice(room.RequestedParticipants)
+	}
+	board.ParticipantConfirmed = cloneStringSlice(room.ConfirmedParticipants)
+	if len(board.ParticipantCandidates) == 0 && len(room.Roles) > 0 {
+		board.ParticipantCandidates = defaultConsensusParticipantCandidates(room)
+	}
+	board.UpdatedAt = time.Now()
+}
+
+func defaultConsensusParticipantCandidates(room *DebateRoom) []string {
+	if room == nil {
+		return nil
+	}
+	hostRole := normalizeRoleToken(room.HostRole)
+	if hostRole == "" {
+		hostRole = normalizeRoleToken(resolveDebateRoleKey(room.Roles, "jarvis"))
+	}
+	out := make([]string, 0, len(room.Roles))
+	for _, role := range room.Roles {
+		if normalizeRoleToken(role.Role) == hostRole {
+			continue
+		}
+		if strings.TrimSpace(role.Role) == "" {
+			continue
+		}
+		out = append(out, role.Role)
 	}
 	return out
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSelectDebateSpeakers(t *testing.T) {
@@ -162,6 +163,105 @@ func TestIsAskTimeoutErr(t *testing.T) {
 		if got != tc.want {
 			t.Fatalf("isAskTimeoutErr(%v)=%v want=%v", tc.err, got, tc.want)
 		}
+	}
+}
+
+func TestSplitConsensusRolesForRoomWithConfirmedParticipants(t *testing.T) {
+	room := &DebateRoom{
+		HostRole: "jarvis",
+		Roles: []DebateRole{
+			{Role: "jarvis", DisplayName: "Jarvis"},
+			{Role: "jianzhu", DisplayName: "剑主"},
+			{Role: "wendan", DisplayName: "文胆"},
+			{Role: "xingzou", DisplayName: "行走"},
+		},
+		ConfirmedParticipants: []string{"jianzhu", "xingzou"},
+	}
+	host, workers := splitConsensusRolesForRoom(room, true)
+	if host.Role != "jarvis" {
+		t.Fatalf("host mismatch: %q", host.Role)
+	}
+	if len(workers) != 2 {
+		t.Fatalf("workers len mismatch: %d", len(workers))
+	}
+	if workers[0].Role != "jianzhu" || workers[1].Role != "xingzou" {
+		t.Fatalf("workers mismatch: %+v", workers)
+	}
+}
+
+func TestRenderDebateFinalReport(t *testing.T) {
+	room := &DebateRoom{
+		RoomID:                "debate_20260319_100000_000001",
+		Mode:                  DebateModeConsensus,
+		HostRole:              "jarvis",
+		Status:                DebateStatusCompleted,
+		Question:              "如何把需求拆成可并行执行的任务",
+		RefinedQuestion:       "如何把需求拆成可并行执行任务并定义验收标准",
+		UserReviewStatus:      "rejected",
+		UserReviewFeedback:    "首轮方案还需要更细的角色分工",
+		ConfirmedParticipants: []string{"jianzhu", "wendan"},
+		CreatedAt:             time.Now().Add(-20 * time.Minute),
+	}
+	board := &DebateBlackboard{
+		RefinedTopic:      room.RefinedQuestion,
+		HostFirstProposal: "先定义拆分维度：业务模块、依赖、风险、验收。",
+		ConsensusPoints:   []string{"先锁定目标产物", "按依赖拓扑拆分"},
+		Unresolved:        []string{"跨团队接口变更节奏"},
+	}
+	transcript := []DebateTranscriptEntry{
+		{Round: 1, Role: "jianzhu", Content: "建议先明确边界。"},
+		{Round: 2, Role: "wendan", Content: "建议给每项任务加验收标准。"},
+	}
+	got := renderDebateFinalReport(room, board, transcript, "最终结论：先完成任务拓扑图，再并行执行。")
+	if got == "" {
+		t.Fatal("report should not be empty")
+	}
+	if !containsAll(got, "多Bot讨论成果汇总", "主持人首轮方案", "用户评审", "最终共识总结", "讨论轨迹") {
+		t.Fatalf("report missing expected sections:\n%s", got)
+	}
+}
+
+func TestExtractClarifyDecisionNeedMore(t *testing.T) {
+	raw := "A) 请先补充：你希望最终产出是规划文档还是可执行任务清单？\n\n```json\n{\n  \"type\": \"clarify_decision\",\n  \"need_more\": true,\n  \"question\": \"你希望最终产出是规划文档还是可执行任务清单？\",\n  \"refined_topic\": \"\",\n  \"missing\": [\"目标产物\"],\n  \"summary\": \"缺少目标产物定义\"\n}\n```"
+	got, visible := extractClarifyDecision(raw)
+	if !got.NeedMore {
+		t.Fatalf("need_more mismatch: %+v", got)
+	}
+	if got.Question == "" {
+		t.Fatalf("question should not be empty: %+v", got)
+	}
+	if strings.Contains(visible, "\"clarify_decision\"") {
+		t.Fatalf("visible should strip json section, got=%q", visible)
+	}
+}
+
+func TestExtractClarifyDecisionDone(t *testing.T) {
+	raw := "【澄清结论】信息已足够，进入首轮方案。\n【已锁定议题】围绕“需求拆分并行化”，输出含 owner/依赖/验收标准的执行计划。\n\n```json\n{\"type\":\"clarify_decision\",\"need_more\":false,\"question\":\"\",\"refined_topic\":\"围绕需求拆分并行化，输出含 owner/依赖/验收标准的执行计划。\",\"missing\":[],\"summary\":\"澄清完成\"}\n```"
+	got, _ := extractClarifyDecision(raw)
+	if got.NeedMore {
+		t.Fatalf("need_more should be false: %+v", got)
+	}
+	if got.RefinedTopic == "" {
+		t.Fatalf("refined topic should not be empty: %+v", got)
+	}
+}
+
+func TestCurrentConsensusTopicPrefersFinalThenDraft(t *testing.T) {
+	room := &DebateRoom{
+		Question:        "原始议题",
+		TopicDraft:      "增强议题草案",
+		RefinedQuestion: "用户最终议题",
+	}
+	if got := currentConsensusTopic(room); got != "用户最终议题" {
+		t.Fatalf("final topic should be preferred, got=%q", got)
+	}
+	room.RefinedQuestion = ""
+	if got := currentConsensusTopic(room); got != "增强议题草案" {
+		t.Fatalf("topic draft should be second preferred, got=%q", got)
+	}
+	room.TopicDraft = ""
+	if got := currentConsensusTopic(room); got != "原始议题" {
+		t.Fatalf("original topic should be fallback, got=%q", got)
 	}
 }
 

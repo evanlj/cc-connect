@@ -42,23 +42,29 @@ type DebateRole struct {
 }
 
 type DebateRoom struct {
-	RoomID          string       `json:"room_id"`
-	Status          string       `json:"status"`
-	CreatedAt       time.Time    `json:"created_at"`
-	UpdatedAt       time.Time    `json:"updated_at"`
-	OwnerSessionKey string       `json:"owner_session_key"`
-	GroupChatID     string       `json:"group_chat_id,omitempty"`
-	Question        string       `json:"question"`
-	RefinedQuestion string       `json:"refined_question,omitempty"`
-	Preset          string       `json:"preset"`
-	MaxRounds       int          `json:"max_rounds"`
-	CurrentRound    int          `json:"current_round"`
-	SpeakingPolicy  string       `json:"speaking_policy"`
-	Mode            string       `json:"mode,omitempty"`
-	Phase           string       `json:"phase,omitempty"`
-	Iteration       int          `json:"iteration,omitempty"`
-	Roles           []DebateRole `json:"roles"`
-	StopReason      string       `json:"stop_reason,omitempty"`
+	RoomID                string       `json:"room_id"`
+	Status                string       `json:"status"`
+	CreatedAt             time.Time    `json:"created_at"`
+	UpdatedAt             time.Time    `json:"updated_at"`
+	OwnerSessionKey       string       `json:"owner_session_key"`
+	GroupChatID           string       `json:"group_chat_id,omitempty"`
+	Question              string       `json:"question"`
+	TopicDraft            string       `json:"topic_draft,omitempty"`
+	RefinedQuestion       string       `json:"refined_question,omitempty"`
+	Preset                string       `json:"preset"`
+	MaxRounds             int          `json:"max_rounds"`
+	CurrentRound          int          `json:"current_round"`
+	SpeakingPolicy        string       `json:"speaking_policy"`
+	Mode                  string       `json:"mode,omitempty"`
+	Phase                 string       `json:"phase,omitempty"`
+	Iteration             int          `json:"iteration,omitempty"`
+	HostRole              string       `json:"host_role,omitempty"`
+	RequestedParticipants []string     `json:"requested_participants,omitempty"`
+	ConfirmedParticipants []string     `json:"confirmed_participants,omitempty"`
+	UserReviewStatus      string       `json:"user_review_status,omitempty"`
+	UserReviewFeedback    string       `json:"user_review_feedback,omitempty"`
+	Roles                 []DebateRole `json:"roles"`
+	StopReason            string       `json:"stop_reason,omitempty"`
 }
 
 type DebateTranscriptEntry struct {
@@ -76,6 +82,8 @@ type DebateStartOptions struct {
 	MaxRounds      int
 	SpeakingPolicy string
 	Mode           string
+	HostRole       string
+	Participants   []string
 	Question       string
 }
 
@@ -270,6 +278,40 @@ func (s *DebateStore) transcriptPath(roomID string) string {
 	return filepath.Join(s.transcriptsDir(), roomID+".jsonl")
 }
 
+func (s *DebateStore) reportsDir() string {
+	return filepath.Join(s.rootDir, "reports")
+}
+
+func (s *DebateStore) reportPath(roomID string) string {
+	return filepath.Join(s.reportsDir(), roomID+"-final.md")
+}
+
+func (s *DebateStore) SaveFinalReport(roomID, content string) (string, error) {
+	if !s.Enabled() {
+		return "", fmt.Errorf("debate store is disabled")
+	}
+	roomID = strings.TrimSpace(roomID)
+	if roomID == "" {
+		return "", fmt.Errorf("room_id is required")
+	}
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return "", fmt.Errorf("report content is empty")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := os.MkdirAll(s.reportsDir(), 0o755); err != nil {
+		return "", fmt.Errorf("create reports dir: %w", err)
+	}
+	path := s.reportPath(roomID)
+	if err := os.WriteFile(path, []byte(content+"\n"), 0o644); err != nil {
+		return "", fmt.Errorf("write report: %w", err)
+	}
+	return path, nil
+}
+
 func defaultDebateRoles() []DebateRole {
 	// Preferred mapping for this branch/user setup:
 	// D:/ai-github/cc-connect/mutilbot/instance-mutilbot{1..5}
@@ -334,22 +376,35 @@ func defaultDebateRoles() []DebateRole {
 
 func NewDebateRoom(ownerSessionKey string, opts DebateStartOptions, now time.Time) *DebateRoom {
 	normalized := NormalizeDebateStartOptions(opts)
+	roles := defaultDebateRoles()
+	hostRole := resolveDebateRoleKey(roles, normalized.HostRole)
+	if hostRole == "" {
+		hostRole = resolveDebateRoleKey(roles, "jarvis")
+	}
+	if hostRole == "" && len(roles) > 0 {
+		hostRole = roles[0].Role
+	}
+	participants := normalizeDebateRoleList(roles, normalized.Participants, hostRole)
 	return &DebateRoom{
-		RoomID:          newDebateRoomID(now),
-		Status:          DebateStatusRunning,
-		CreatedAt:       now,
-		UpdatedAt:       now,
-		OwnerSessionKey: ownerSessionKey,
-		GroupChatID:     extractGroupChatID(ownerSessionKey),
-		Question:        strings.TrimSpace(normalized.Question),
-		Preset:          normalized.Preset,
-		MaxRounds:       normalized.MaxRounds,
-		CurrentRound:    0,
-		SpeakingPolicy:  normalized.SpeakingPolicy,
-		Mode:            normalized.Mode,
-		Phase:           "init",
-		Iteration:       0,
-		Roles:           defaultDebateRoles(),
+		RoomID:                newDebateRoomID(now),
+		Status:                DebateStatusRunning,
+		CreatedAt:             now,
+		UpdatedAt:             now,
+		OwnerSessionKey:       ownerSessionKey,
+		GroupChatID:           extractGroupChatID(ownerSessionKey),
+		Question:              strings.TrimSpace(normalized.Question),
+		Preset:                normalized.Preset,
+		MaxRounds:             normalized.MaxRounds,
+		CurrentRound:          0,
+		SpeakingPolicy:        normalized.SpeakingPolicy,
+		Mode:                  normalized.Mode,
+		Phase:                 "init",
+		Iteration:             0,
+		HostRole:              hostRole,
+		RequestedParticipants: cloneStringSlice(participants),
+		ConfirmedParticipants: nil,
+		UserReviewStatus:      "pending",
+		Roles:                 roles,
 	}
 }
 
@@ -376,6 +431,8 @@ func NormalizeDebateStartOptions(in DebateStartOptions) DebateStartOptions {
 	if out.MaxRounds > MaxDebateMaxRounds {
 		out.MaxRounds = MaxDebateMaxRounds
 	}
+	out.HostRole = normalizeRoleToken(out.HostRole)
+	out.Participants = normalizeRoleTokens(out.Participants)
 	out.Question = normalizeDebateQuestion(out.Question)
 	return out
 }
@@ -393,6 +450,9 @@ func ValidateDebateStartOptions(in DebateStartOptions) error {
 	}
 	if mode != DebateModeClassic && mode != DebateModeConsensus {
 		return fmt.Errorf("mode must be one of [%s,%s]", DebateModeClassic, DebateModeConsensus)
+	}
+	if strings.TrimSpace(in.HostRole) != "" && normalizeRoleToken(in.HostRole) == "" {
+		return fmt.Errorf("host_role is invalid")
 	}
 	return nil
 }
@@ -452,4 +512,90 @@ func isMentionToken(token string) bool {
 		return false
 	}
 	return strings.HasPrefix(t, "@")
+}
+
+func normalizeRoleToken(raw string) string {
+	v := strings.TrimSpace(strings.ToLower(raw))
+	v = strings.TrimPrefix(v, "@")
+	v = strings.Trim(v, "，,。.!?;；:：()[]{}<>《》\"'`“”‘’")
+	return strings.TrimSpace(v)
+}
+
+func normalizeRoleTokens(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	for _, raw := range in {
+		token := normalizeRoleToken(raw)
+		if token == "" || seen[token] {
+			continue
+		}
+		seen[token] = true
+		out = append(out, token)
+	}
+	return out
+}
+
+func cloneStringSlice(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		out = append(out, s)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeDebateRoleList(roles []DebateRole, raw []string, hostRole string) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	hostRole = normalizeRoleToken(hostRole)
+	out := make([]string, 0, len(raw))
+	seen := map[string]bool{}
+	for _, item := range raw {
+		roleKey := resolveDebateRoleKey(roles, item)
+		if roleKey == "" {
+			roleKey = normalizeRoleToken(item)
+		}
+		if roleKey == "" || roleKey == hostRole || seen[roleKey] {
+			continue
+		}
+		seen[roleKey] = true
+		out = append(out, roleKey)
+	}
+	return out
+}
+
+func resolveDebateRoleKey(roles []DebateRole, raw string) string {
+	target := normalizeRoleToken(raw)
+	if target == "" {
+		return ""
+	}
+	for _, role := range roles {
+		if normalizeRoleToken(role.Role) == target {
+			return role.Role
+		}
+	}
+	for _, role := range roles {
+		if normalizeRoleToken(role.DisplayName) == target {
+			return role.Role
+		}
+	}
+	for _, role := range roles {
+		if normalizeRoleToken(role.Instance) == target {
+			return role.Role
+		}
+		if normalizeRoleToken(role.Project) == target {
+			return role.Role
+		}
+	}
+	return ""
 }

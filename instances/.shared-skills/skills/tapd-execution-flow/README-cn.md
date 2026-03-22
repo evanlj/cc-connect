@@ -6,13 +6,14 @@
 核心流程：
 
 1) 获取需求  
-2) 确认主/验收模型  
-3) 生成并确认主/验收提示词  
-4) 回填提示词到 TAPD  
-5) 执行主任务并回填  
-6) 执行验收并逐条三段式回填  
-7) 回填测试用例并建立 story↔tcase 关联  
-8) 按结果流转状态（PASS->`status_6`，FAIL->`status_4`）
+2) 确认规划/主/验收模型  
+3) 对齐实现方案 + DoD（先确认并回填）  
+4) 生成并确认执行/验收提示词（角色化动态生成）  
+5) 回填提示词到 TAPD  
+6) 执行主任务并回填  
+7) 执行验收并逐条三段式回填  
+8) 回填测试用例并建立 story↔tcase 关联  
+9) 按结果流转状态（PASS->`status_6`，FAIL->`status_4`）
 
 ---
 
@@ -32,9 +33,14 @@
 建议在启动时明确这些信息：
 
 - 需求 ID（story id）
+- 规划模型（plan model，用于生成“实现方案 + DoD”）
 - 主任务模型（例如 `rc + 5.2`）
 - 验收任务模型（例如 `rc + 5.3-codex`）
 - 关键硬约束（资源全量、场景可验收、Skill 可回滚等）
+
+（推荐）同时明确授权边界，避免中途反复确认：
+- 允许：回填 TAPD 评论、本地 commit
+- 不允许：`git push`、修改 TAPD 状态（需要你明确说“允许”才会做）
 
 ---
 
@@ -73,6 +79,7 @@
 
 - 技能主文档：`SKILL.md`
 - 中文流程说明：`SKILL-cn.md`
+- 角色化提示词规范：`references/prompt-spec.md`
 - 清单：`references/workflow-checklist.md`
 - 回填模板：`references/tapd-html-templates.md`
 - 整改循环：`references/remediation-loop.md`

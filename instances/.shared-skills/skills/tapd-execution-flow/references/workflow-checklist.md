@@ -11,6 +11,11 @@
 - [ ] Main prompt generated and user-confirmed.
 - [ ] Acceptance prompt generated and user-confirmed.
 - [ ] Both prompts backfilled to TAPD (HTML format).
+- [ ] Dynamic prompts follow role contracts (`references/prompt-spec.md`):
+  - Planner Prompt Contract
+  - Execution Prompt Contract
+  - Acceptance Prompt Contract
+- [ ] Prompt Quality Gate passed before confirmation (Fast Lane block + constraints + output schema + stop condition).
 
 ## Main Task Execution
 - [ ] Execution scope and path boundaries declared.
@@ -26,6 +31,15 @@
   - acceptance result (PASS/FAIL + evidence)
 - [ ] Acceptance summary includes PASS/FAIL counts and status suggestion.
 - [ ] Acceptance result backfilled to TAPD.
+
+## Decision Defaults (Anti-Detour)
+- [ ] Overall result is **PASS/FAIL only** (no BLOCK / PARTIAL / UNKNOWN).
+- [ ] If any required item is **not executed** or **missing evidence**, mark that item as **FAIL** and set overall result to **FAIL**.
+  - Explain “pending CI / blocked by env” in process/evidence, but keep result binary.
+- [ ] Status suggestion must be derived from overall result only:
+  - PASS -> `status_6`
+  - FAIL -> `status_4`
+- [ ] Do not spend time on non-critical cleanup/format perfection unless it blocks execution or is required by DoD.
 
 ## Test Case Menu
 - [ ] Test steps written to TAPD test-case menu (not comment-only).

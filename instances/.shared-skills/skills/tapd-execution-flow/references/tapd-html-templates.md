@@ -27,6 +27,7 @@
 ```html
 <p><strong>提示词回填（需求 {{story_id}}）</strong></p>
 <p>回填时间：<code>{{time}}</code><br/>
+方案模型：<code>{{plan_model}}</code><br/>
 主任务模型：<code>{{main_model}}</code><br/>
 验收任务模型：<code>{{accept_model}}</code></p>
 <p><strong>主子任务提示词</strong></p>

@@ -185,6 +185,7 @@ func (cs *codexSession) openTurnTrace(ts *turnState, prompt string, isResume boo
 	seq := codexTurnSeq.Add(1)
 	fileName := fmt.Sprintf("%s_turn_%d.jsonl", time.Now().Format("150405.000000000"), seq)
 	path := filepath.Join(traceDir, fileName)
+	promptLogPath := filepath.Join(traceDir, "prompts-full.jsonl")
 
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -213,14 +214,72 @@ func (cs *codexSession) openTurnTrace(ts *turnState, prompt string, isResume boo
 		"cc_project":       extractEnv(cs.extraEnv, "CC_PROJECT"),
 		"cc_session_key":   extractEnv(cs.extraEnv, "CC_SESSION_KEY"),
 		"trace_path":       path,
+		"prompt_log_path":  promptLogPath,
 	}
 	ts.traceWriteJSON(meta)
+	ts.traceWriteJSON(map[string]any{
+		"type":       "prompt_full",
+		"ts":         time.Now().Format(time.RFC3339Nano),
+		"prompt":     prompt,
+		"prompt_len": len(prompt),
+		"prompt_sha": promptHash(prompt),
+	})
+	if err := appendPromptFullLog(promptLogPath, map[string]any{
+		"type":             "prompt_full",
+		"ts":               time.Now().Format(time.RFC3339Nano),
+		"agent":            "codex",
+		"work_dir":         cs.workDir,
+		"model":            cs.model,
+		"mode":             cs.mode,
+		"resume":           isResume,
+		"resume_thread_id": resumeID,
+		"prompt":           prompt,
+		"prompt_len":       len(prompt),
+		"prompt_sha":       promptHash(prompt),
+		"trace_path":       path,
+		"cc_project":       extractEnv(cs.extraEnv, "CC_PROJECT"),
+		"cc_session_key":   extractEnv(cs.extraEnv, "CC_SESSION_KEY"),
+	}); err != nil {
+		slog.Warn("codexSession: failed to append full prompt log", "path", promptLogPath, "error", err)
+	}
 	slog.Info("codexSession: turn trace enabled", "path", path)
 }
 
+func appendPromptFullLog(path string, payload map[string]any) error {
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("path is empty")
+	}
+	if payload == nil {
+		return fmt.Errorf("payload is nil")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		return err
+	}
+	return nil
+}
+
 // Send launches a codex subprocess.
-// If a threadID exists (from a prior turn or resume), uses `codex exec resume <id> <prompt>`.
-// Otherwise uses `codex exec <prompt>` to start a new conversation.
+// If a threadID exists (from a prior turn or resume), uses `codex exec resume <id> -`
+// and streams prompt from stdin.
+// Otherwise uses `codex exec --cd <workDir> -` and streams prompt from stdin.
+//
+// Why stdin:
+// On Windows, npm's codex.cmd shim forwards `%*` through cmd.exe. Complex prompts with
+// JSON/quotes/pipes (e.g. PASS|REWORK) can be misparsed as shell operators and fail with
+// "The filename, directory name, or volume label syntax is incorrect."
+// Passing "-" and writing prompt to stdin avoids command-line parsing pitfalls.
 func (cs *codexSession) Send(prompt string, images []core.ImageAttachment) error {
 	if len(images) > 0 {
 		slog.Warn("codexSession: images not supported by Codex, ignoring")
@@ -232,32 +291,7 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment) error
 	tid := cs.CurrentSessionID()
 	isResume := tid != ""
 
-	var args []string
-	if isResume {
-		args = []string{"exec", "resume", "--json", "--skip-git-repo-check"}
-	} else {
-		args = []string{"exec", "--json", "--skip-git-repo-check"}
-	}
-
-	switch cs.mode {
-	case "auto-edit", "full-auto":
-		args = append(args, "--full-auto")
-	case "yolo":
-		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
-	}
-	if len(cs.configArgs) > 0 {
-		args = append(args, cs.configArgs...)
-	}
-
-	if cs.model != "" {
-		args = append(args, "--model", cs.model)
-	}
-
-	if isResume {
-		args = append(args, tid, prompt)
-	} else {
-		args = append(args, "--cd", cs.workDir, prompt)
-	}
+	args := cs.buildSendArgs(isResume, tid)
 
 	slog.Debug("codexSession: launching", "resume", isResume, "args", args)
 
@@ -268,6 +302,7 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment) error
 	turnCtx, turnCancel := context.WithCancel(cs.ctx)
 	cmd := exec.CommandContext(turnCtx, "codex", args...)
 	cmd.Dir = cs.workDir
+	cmd.Stdin = strings.NewReader(prompt)
 	if len(cs.extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), cs.extraEnv...)
 	}
@@ -304,6 +339,36 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment) error
 	)
 
 	return nil
+}
+
+func (cs *codexSession) buildSendArgs(isResume bool, tid string) []string {
+	var args []string
+	if isResume {
+		args = []string{"exec", "resume", "--json", "--skip-git-repo-check"}
+	} else {
+		args = []string{"exec", "--json", "--skip-git-repo-check"}
+	}
+
+	switch cs.mode {
+	case "auto-edit", "full-auto":
+		args = append(args, "--full-auto")
+	case "yolo":
+		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
+	}
+	if len(cs.configArgs) > 0 {
+		args = append(args, cs.configArgs...)
+	}
+
+	if cs.model != "" {
+		args = append(args, "--model", cs.model)
+	}
+
+	if isResume {
+		args = append(args, tid, "-")
+	} else {
+		args = append(args, "--cd", cs.workDir, "-")
+	}
+	return args
 }
 
 func (cs *codexSession) readLoop(

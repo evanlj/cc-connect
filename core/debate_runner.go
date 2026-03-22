@@ -246,14 +246,18 @@ func (e *Engine) retryDebateReply(ctx context.Context, socketPath string, baseRe
 }
 
 const (
-	consensusPhaseInit        = "init"
-	consensusPhaseClarify     = "clarify_with_user"
-	consensusPhaseHostSeed    = "host_seed"
-	consensusPhaseAllDiverge  = "all_diverge"
-	consensusPhaseHostCollect = "host_collect"
-	consensusPhaseAllResolve  = "all_resolve"
-	consensusPhaseHostCheck   = "host_consensus_check"
-	consensusPhaseFinalize    = "host_finalize"
+	consensusPhaseInit               = "init"
+	consensusPhaseTopicRefine        = "topic_refine_host"
+	consensusPhaseTopicConfirm       = "topic_confirm_user"
+	consensusPhaseHostFirstProposal  = "host_first_proposal"
+	consensusPhaseUserReview         = "user_proposal_review"
+	consensusPhaseParticipantConfirm = "participant_confirm"
+	consensusPhaseAllDiverge         = "all_diverge"
+	consensusPhaseHostCollect        = "host_collect"
+	consensusPhaseAllResolve         = "all_resolve"
+	consensusPhaseHostCheck          = "host_consensus_check"
+	consensusPhaseFinalizeSingle     = "finalize_single"
+	consensusPhaseFinalize           = "host_finalize"
 )
 
 func (e *Engine) runConsensusDebateRoom(ctx context.Context, room *DebateRoom) {
@@ -267,27 +271,18 @@ func (e *Engine) runConsensusDebateRoom(ctx context.Context, room *DebateRoom) {
 	}
 	blackboardPath := e.debateStore.BlackboardFilePath(room.RoomID)
 	if board != nil {
+		syncBlackboardWithRoom(board, room)
 		board.Mode = DebateModeConsensus
-		if strings.TrimSpace(room.RefinedQuestion) != "" {
-			board.RefinedTopic = strings.TrimSpace(room.RefinedQuestion)
-		}
 		UpdateBlackboardWorkflow(board, DebateModeConsensus, emptyAs(room.Phase, consensusPhaseInit), room.Iteration)
 		_ = e.debateStore.SaveBlackboard(board)
 	}
 
-	host, workers := splitConsensusRoles(room.Roles)
+	host, _ := splitConsensusRolesForRoom(room, false)
 	if strings.TrimSpace(host.Role) == "" {
 		room.Status = DebateStatusFailed
 		room.StopReason = "no_host"
 		_ = e.debateStore.SaveRoom(room)
 		_ = e.SendBySessionKey(room.OwnerSessionKey, "【Jarvis】讨论失败：未找到主持人角色。")
-		return
-	}
-	if len(workers) == 0 {
-		room.Status = DebateStatusFailed
-		room.StopReason = "no_workers"
-		_ = e.debateStore.SaveRoom(room)
-		_ = e.SendBySessionKey(room.OwnerSessionKey, "【Jarvis】讨论失败：未找到可发言角色。")
 		return
 	}
 
@@ -297,306 +292,451 @@ func (e *Engine) runConsensusDebateRoom(ctx context.Context, room *DebateRoom) {
 	if room.MaxRounds <= 0 {
 		room.MaxRounds = DefaultDebateMaxRounds
 	}
+	if strings.TrimSpace(room.UserReviewStatus) == "" {
+		room.UserReviewStatus = "pending"
+	}
 	if room.Status == DebateStatusCreated {
 		room.Status = DebateStatusRunning
 	}
 	_ = e.debateStore.SaveRoom(room)
 
-	if room.Phase == consensusPhaseInit {
-		room.Phase = consensusPhaseClarify
-		_ = e.debateStore.SaveRoom(room)
-	}
-
-	if room.Phase == consensusPhaseClarify {
-		if strings.TrimSpace(room.RefinedQuestion) == "" {
-			questions := defaultClarifyQuestions(room.Question)
-			if board != nil {
-				board.OpenQuestions = mergeUniqueQuestions(board.OpenQuestions, questions, 8)
-				UpdateBlackboardWorkflow(board, DebateModeConsensus, consensusPhaseClarify, room.Iteration)
-				_ = e.debateStore.SaveBlackboard(board)
-			}
-			var b strings.Builder
-			b.WriteString(fmt.Sprintf("【Jarvis】进入澄清阶段（room=%s）。\n", room.RoomID))
-			b.WriteString("为避免讨论跑偏，请先补充以下信息（可一条消息回答）：\n")
-			for i, q := range questions {
-				b.WriteString(fmt.Sprintf("%d) %s\n", i+1, q))
-			}
-			b.WriteString(fmt.Sprintf("\n回复方式：`/debate answer %s <你的补充信息>`", room.RoomID))
-			_ = e.SendBySessionKey(room.OwnerSessionKey, strings.TrimSpace(b.String()))
-			room.Status = DebateStatusWaiting
-			room.StopReason = "await_user_clarification"
-			_ = e.debateStore.SaveRoom(room)
-			return
-		}
-		room.Phase = consensusPhaseHostSeed
-		room.Status = DebateStatusRunning
-		room.StopReason = ""
-		_ = e.debateStore.SaveRoom(room)
-	}
-
-	topic := currentConsensusTopic(room)
 	transcript := make([]DebateTranscriptEntry, 0, room.MaxRounds*8)
 	if old, err := e.debateStore.LoadTranscript(room.RoomID); err == nil {
 		transcript = append(transcript, old...)
 	}
 
-	if room.Phase == consensusPhaseHostSeed {
-		_ = e.SendBySessionKey(room.OwnerSessionKey, "【Jarvis】阶段1/6：主持人先行立论并同步黑板。")
-		reply, latency, err := e.askDebateRole(ctx, room, host, buildConsensusHostSeedPrompt(room, board, topic, blackboardPath))
-		if err != nil {
-			// Fallback instead of hard-fail:
-			// keep discussion moving even if host model call times out.
-			fallback := buildConsensusHostSeedFallback(topic, board)
-			_ = e.SendBySessionKey(room.OwnerSessionKey, fmt.Sprintf("【Jarvis】主持人立论超时，已启用兜底立论继续流程：%s", truncateStr(err.Error(), 120)))
-			_ = e.sendDebateRoleSpeech(ctx, room, host, fallback)
-			entry := DebateTranscriptEntry{
-				Round:    0,
-				Speaker:  host.Instance,
-				Role:     host.Role,
-				PostedBy: host.Instance,
-				Content:  fallback,
+	appendEntry := func(entry DebateTranscriptEntry) {
+		_ = e.debateStore.AppendTranscript(room.RoomID, entry)
+		transcript = append(transcript, entry)
+	}
+
+	waitAndExit := func(stopReason, message string) {
+		room.Status = DebateStatusWaiting
+		room.StopReason = stopReason
+		_ = e.debateStore.SaveRoom(room)
+		if board != nil {
+			syncBlackboardWithRoom(board, room)
+			UpdateBlackboardWorkflow(board, DebateModeConsensus, room.Phase, room.Iteration)
+			_ = e.debateStore.SaveBlackboard(board)
+		}
+		if strings.TrimSpace(message) != "" {
+			_ = e.SendBySessionKey(room.OwnerSessionKey, message)
+		}
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			room.Status = DebateStatusStopped
+			room.StopReason = "manual_stop"
+			_ = e.debateStore.SaveRoom(room)
+			return
+		default:
+		}
+
+		if board != nil {
+			syncBlackboardWithRoom(board, room)
+			UpdateBlackboardWorkflow(board, DebateModeConsensus, room.Phase, room.Iteration)
+			_ = e.debateStore.SaveBlackboard(board)
+		}
+
+		topic := currentConsensusTopic(room)
+
+		switch room.Phase {
+		case consensusPhaseInit:
+			room.Phase = consensusPhaseTopicRefine
+			room.Status = DebateStatusRunning
+			room.StopReason = ""
+			_ = e.debateStore.SaveRoom(room)
+			continue
+
+		case consensusPhaseTopicRefine:
+			_ = e.SendBySessionKey(room.OwnerSessionKey, "【Jarvis】阶段1/8：主持人先自动完善你的议题。")
+			reply, latency, err := e.askDebateRole(ctx, room, host, buildConsensusTopicRefinePrompt(room, board, topic))
+			if err != nil {
+				fallback := buildConsensusTopicDraftFallback(topic)
+				_ = e.SendBySessionKey(room.OwnerSessionKey, fmt.Sprintf("【Jarvis】议题完善超时，已启用兜底草案：%s", truncateStr(err.Error(), 120)))
+				reply = fallback
+				latency = 0
 			}
-			_ = e.debateStore.AppendTranscript(room.RoomID, entry)
-			transcript = append(transcript, entry)
-			ApplyRoleContribution(board, host, 0, fallback)
-		} else {
 			display := extractDebateDisplayContent(reply)
 			if strings.TrimSpace(display) == "" {
 				display = reply
 			}
 			_ = e.sendDebateRoleSpeech(ctx, room, host, display)
-			entry := DebateTranscriptEntry{
+			appendEntry(DebateTranscriptEntry{
 				Round:     0,
 				Speaker:   host.Instance,
 				Role:      host.Role,
 				PostedBy:  host.Instance,
 				Content:   display,
 				LatencyMS: latency,
+			})
+			contrib := ApplyRoleContribution(board, host, 0, reply)
+			topicDraft := normalizeTopicDraft(firstNonEmpty(
+				extractTopicDraftFromReply(reply),
+				contrib.Stance,
+				display,
+				topic,
+			))
+			if topicDraft == "" {
+				topicDraft = normalizeTopicDraft(topic)
 			}
-			_ = e.debateStore.AppendTranscript(room.RoomID, entry)
-			transcript = append(transcript, entry)
-			ApplyRoleContribution(board, host, 0, reply)
-		}
-		if board != nil {
-			board.RefinedTopic = topic
-			UpdateBlackboardWorkflow(board, DebateModeConsensus, consensusPhaseHostSeed, room.Iteration)
-			_ = e.debateStore.SaveBlackboard(board)
-		}
-		room.Phase = consensusPhaseAllDiverge
-		_ = e.debateStore.SaveRoom(room)
-	}
+			room.TopicDraft = topicDraft
+			room.RefinedQuestion = ""
+			room.UserReviewStatus = "pending"
+			room.UserReviewFeedback = ""
+			room.Status = DebateStatusRunning
+			room.StopReason = ""
+			room.Phase = consensusPhaseTopicConfirm
+			_ = e.debateStore.SaveRoom(room)
 
-	if room.Phase == consensusPhaseAllDiverge {
-		_ = e.SendBySessionKey(room.OwnerSessionKey, fmt.Sprintf("【Jarvis】阶段2/6：全员发散讨论（%d位）。", len(workers)))
-		for _, role := range workers {
-			select {
-			case <-ctx.Done():
-				room.Status = DebateStatusStopped
-				room.StopReason = "manual_stop"
-				_ = e.debateStore.SaveRoom(room)
-				return
-			default:
-			}
-			reply, latency, err := e.askDebateRole(ctx, room, role, buildConsensusWorkerDivergePrompt(room, role, board, topic, blackboardPath))
-			if err != nil {
-				entry := DebateTranscriptEntry{
-					Round:    1,
-					Speaker:  role.Instance,
-					Role:     role.Role,
-					PostedBy: role.Instance,
-					Content:  "ERROR: " + err.Error(),
-				}
-				_ = e.debateStore.AppendTranscript(room.RoomID, entry)
-				transcript = append(transcript, entry)
-				continue
-			}
-			display := extractDebateDisplayContent(reply)
-			if strings.TrimSpace(display) == "" {
-				display = reply
-			}
-			_ = e.sendDebateRoleSpeech(ctx, room, role, display)
-			entry := DebateTranscriptEntry{
-				Round:     1,
-				Speaker:   role.Instance,
-				Role:      role.Role,
-				PostedBy:  role.Instance,
-				Content:   display,
-				LatencyMS: latency,
-			}
-			_ = e.debateStore.AppendTranscript(room.RoomID, entry)
-			transcript = append(transcript, entry)
-			ApplyRoleContribution(board, role, 1, reply)
 			if board != nil {
+				board.TopicDraft = topicDraft
+				board.RefinedTopic = ""
+				board.FinalTopicLocked = false
+				board.UserReviewStatus = "pending"
+				board.UserReviewFeedback = ""
+				board.ParticipantCandidates = defaultConsensusParticipantCandidates(room)
+				board.OpenQuestions = mergeUniqueQuestions(board.OpenQuestions, extractQuestions(reply), 12)
+				UpdateBlackboardWorkflow(board, DebateModeConsensus, consensusPhaseTopicConfirm, room.Iteration)
 				_ = e.debateStore.SaveBlackboard(board)
 			}
-		}
-		room.Phase = consensusPhaseHostCollect
-		_ = e.debateStore.SaveRoom(room)
-	}
+			waitAndExit("await_user_final_topic",
+				fmt.Sprintf("【Jarvis】我已基于你的原始话题整理出“增强议题草案”：\n%s\n\n请你在此基础上修改并提交最终议题：`/debate topic %s <最终议题>`", topicDraft, room.RoomID))
+			return
 
-	if room.Phase == consensusPhaseHostCollect {
-		_ = e.SendBySessionKey(room.OwnerSessionKey, "【Jarvis】阶段3/6：主持人收集分歧与疑问。")
-		reply, latency, err := e.askDebateRole(ctx, room, host, buildConsensusHostCollectPrompt(room, board, topic))
-		if err == nil {
-			display := extractDebateDisplayContent(reply)
-			if strings.TrimSpace(display) == "" {
-				display = reply
+		case consensusPhaseTopicConfirm:
+			waitAndExit("await_user_final_topic",
+				fmt.Sprintf("【Jarvis】等待你提交最终议题：`/debate topic %s <最终议题>`", room.RoomID))
+			return
+
+		case consensusPhaseHostFirstProposal:
+			_ = e.SendBySessionKey(room.OwnerSessionKey, "【Jarvis】阶段3/8：基于最终议题，主持人给出第一轮回答。")
+			reply, latency, err := e.askDebateRole(ctx, room, host, buildConsensusHostSeedPrompt(room, board, topic, blackboardPath))
+			finalReply := reply
+			finalDisplay := extractDebateDisplayContent(reply)
+			if err != nil {
+				fallback := buildConsensusHostSeedFallback(topic, board)
+				finalReply = fallback
+				finalDisplay = fallback
+				_ = e.SendBySessionKey(room.OwnerSessionKey, fmt.Sprintf("【Jarvis】主持人首轮立论超时，已启用兜底方案继续流程：%s", truncateStr(err.Error(), 120)))
 			}
-			_ = e.sendDebateRoleSpeech(ctx, room, host, display)
+			if strings.TrimSpace(finalDisplay) == "" {
+				finalDisplay = finalReply
+			}
+			_ = e.sendDebateRoleSpeech(ctx, room, host, finalDisplay)
 			entry := DebateTranscriptEntry{
-				Round:     2,
-				Speaker:   host.Instance,
-				Role:      host.Role,
-				PostedBy:  host.Instance,
-				Content:   display,
-				LatencyMS: latency,
+				Round:    0,
+				Speaker:  host.Instance,
+				Role:     host.Role,
+				PostedBy: host.Instance,
+				Content:  finalDisplay,
 			}
-			_ = e.debateStore.AppendTranscript(room.RoomID, entry)
-			transcript = append(transcript, entry)
-			ApplyRoleContribution(board, host, 2, reply)
-		}
-		if board != nil {
-			board.ConsensusPoints, board.Unresolved = summarizeConsensusFromBoard(board, room)
-			board.OpenQuestions = mergeUniqueQuestions(board.OpenQuestions, board.Unresolved, 12)
-			UpdateBlackboardWorkflow(board, DebateModeConsensus, consensusPhaseHostCollect, room.Iteration)
-			_ = e.debateStore.SaveBlackboard(board)
-		}
-		room.Phase = consensusPhaseAllResolve
-		if room.Iteration <= 0 {
-			room.Iteration = 1
-		}
-		_ = e.debateStore.SaveRoom(room)
-	}
+			if err == nil {
+				entry.LatencyMS = latency
+			}
+			appendEntry(entry)
+			contrib := ApplyRoleContribution(board, host, 0, finalReply)
+			if board != nil {
+				board.RefinedTopic = topic
+				board.FinalTopicLocked = strings.TrimSpace(topic) != ""
+				board.UserReviewStatus = "pending"
+				board.UserReviewFeedback = ""
+				board.HostFirstProposal = truncateStr(strings.TrimSpace(contrib.Stance), 500)
+				riskLines := extractQuestions(contrib.Risk)
+				if len(riskLines) == 0 && strings.TrimSpace(contrib.Risk) != "" {
+					riskLines = []string{truncateStr(strings.TrimSpace(contrib.Risk), 120)}
+				}
+				board.HostFirstProposalRisks = dedupeLines(riskLines, 6)
+				UpdateBlackboardWorkflow(board, DebateModeConsensus, consensusPhaseHostFirstProposal, room.Iteration)
+				_ = e.debateStore.SaveBlackboard(board)
+			}
+			room.Phase = consensusPhaseUserReview
+			room.UserReviewStatus = "pending"
+			room.UserReviewFeedback = ""
+			room.Status = DebateStatusRunning
+			room.StopReason = ""
+			_ = e.debateStore.SaveRoom(room)
+			waitAndExit("await_user_review", fmt.Sprintf("【Jarvis】请评审主持人首轮方案：\n- 满意：`/debate decision %s approve [可选反馈]`\n- 不满意：`/debate decision %s reject <反馈>`", room.RoomID, room.RoomID))
+			return
 
-	for room.Phase == consensusPhaseAllResolve {
-		if room.Iteration <= 0 {
-			room.Iteration = 1
-		}
-		if room.Iteration > room.MaxRounds {
-			room.Status = DebateStatusWaiting
-			room.StopReason = "await_user_decision"
-			room.Phase = consensusPhaseClarify
+		case consensusPhaseUserReview:
+			switch strings.ToLower(strings.TrimSpace(room.UserReviewStatus)) {
+			case "approved":
+				room.Phase = consensusPhaseFinalizeSingle
+				room.Status = DebateStatusRunning
+				room.StopReason = ""
+				_ = e.debateStore.SaveRoom(room)
+				continue
+			case "rejected":
+				room.Phase = consensusPhaseParticipantConfirm
+				room.Status = DebateStatusRunning
+				room.StopReason = ""
+				_ = e.debateStore.SaveRoom(room)
+				continue
+			default:
+				waitAndExit("await_user_review", fmt.Sprintf("【Jarvis】等待用户评审主持人首轮方案：`/debate decision %s approve|reject [反馈]`", room.RoomID))
+				return
+			}
+
+		case consensusPhaseParticipantConfirm:
+			_, workers := splitConsensusRolesForRoom(room, true)
+			if len(workers) == 0 {
+				catalog := consensusWorkerRoleCatalog(room)
+				candidates := make([]string, 0, len(catalog))
+				for _, role := range catalog {
+					candidates = append(candidates, role.Role)
+				}
+				if board != nil {
+					board.ParticipantCandidates = cloneStringSlice(candidates)
+					board.ParticipantConfirmed = cloneStringSlice(room.ConfirmedParticipants)
+					board.UserReviewStatus = emptyAs(strings.TrimSpace(room.UserReviewStatus), "rejected")
+					board.UserReviewFeedback = strings.TrimSpace(room.UserReviewFeedback)
+					UpdateBlackboardWorkflow(board, DebateModeConsensus, consensusPhaseParticipantConfirm, room.Iteration)
+					_ = e.debateStore.SaveBlackboard(board)
+				}
+				waitAndExit("await_participants_confirm",
+					fmt.Sprintf("【Jarvis】第一轮方案未满足预期，进入多人讨论前请先选择参与角色（用编号）：\n%s\n\n选择命令：`/debate participants %s 1,2,3`",
+						formatConsensusRoleCatalog(catalog, true), room.RoomID))
+				return
+			}
+			room.Phase = consensusPhaseAllDiverge
+			room.Status = DebateStatusRunning
+			room.StopReason = ""
+			_ = e.debateStore.SaveRoom(room)
+			continue
+
+		case consensusPhaseAllDiverge:
+			_, workers := splitConsensusRolesForRoom(room, true)
+			if len(workers) == 0 {
+				catalog := consensusWorkerRoleCatalog(room)
+				waitAndExit("await_participants_confirm",
+					fmt.Sprintf("【Jarvis】未找到有效参与者，请按编号重新确认：\n%s\n\n`/debate participants %s 1,2,3`",
+						formatConsensusRoleCatalog(catalog, true), room.RoomID))
+				return
+			}
+			_ = e.SendBySessionKey(room.OwnerSessionKey, fmt.Sprintf("【Jarvis】阶段5/8：全员发散讨论（%d位）。", len(workers)))
+			for _, role := range workers {
+				select {
+				case <-ctx.Done():
+					room.Status = DebateStatusStopped
+					room.StopReason = "manual_stop"
+					_ = e.debateStore.SaveRoom(room)
+					return
+				default:
+				}
+				reply, latency, err := e.askDebateRole(ctx, room, role, buildConsensusWorkerDivergePrompt(room, role, board, topic, blackboardPath))
+				if err != nil {
+					entry := DebateTranscriptEntry{
+						Round:    1,
+						Speaker:  role.Instance,
+						Role:     role.Role,
+						PostedBy: role.Instance,
+						Content:  "ERROR: " + err.Error(),
+					}
+					appendEntry(entry)
+					continue
+				}
+				display := extractDebateDisplayContent(reply)
+				if strings.TrimSpace(display) == "" {
+					display = reply
+				}
+				_ = e.sendDebateRoleSpeech(ctx, room, role, display)
+				entry := DebateTranscriptEntry{
+					Round:     1,
+					Speaker:   role.Instance,
+					Role:      role.Role,
+					PostedBy:  role.Instance,
+					Content:   display,
+					LatencyMS: latency,
+				}
+				appendEntry(entry)
+				ApplyRoleContribution(board, role, 1, reply)
+				if board != nil {
+					_ = e.debateStore.SaveBlackboard(board)
+				}
+			}
+			room.Phase = consensusPhaseHostCollect
+			room.Status = DebateStatusRunning
+			room.StopReason = ""
+			_ = e.debateStore.SaveRoom(room)
+			continue
+
+		case consensusPhaseHostCollect:
+			_ = e.SendBySessionKey(room.OwnerSessionKey, "【Jarvis】阶段6/8：主持人收集分歧与疑问。")
+			reply, latency, err := e.askDebateRole(ctx, room, host, buildConsensusHostCollectPrompt(room, board, topic))
+			if err == nil {
+				display := extractDebateDisplayContent(reply)
+				if strings.TrimSpace(display) == "" {
+					display = reply
+				}
+				_ = e.sendDebateRoleSpeech(ctx, room, host, display)
+				entry := DebateTranscriptEntry{
+					Round:     2,
+					Speaker:   host.Instance,
+					Role:      host.Role,
+					PostedBy:  host.Instance,
+					Content:   display,
+					LatencyMS: latency,
+				}
+				appendEntry(entry)
+				ApplyRoleContribution(board, host, 2, reply)
+			}
+			if board != nil {
+				board.ConsensusPoints, board.Unresolved = summarizeConsensusFromBoard(board, room)
+				board.OpenQuestions = mergeUniqueQuestions(board.OpenQuestions, board.Unresolved, 16)
+				UpdateBlackboardWorkflow(board, DebateModeConsensus, consensusPhaseHostCollect, room.Iteration)
+				_ = e.debateStore.SaveBlackboard(board)
+			}
+			room.Phase = consensusPhaseAllResolve
+			if room.Iteration <= 0 {
+				room.Iteration = 1
+			}
+			room.Status = DebateStatusRunning
+			room.StopReason = ""
+			_ = e.debateStore.SaveRoom(room)
+			continue
+
+		case consensusPhaseAllResolve:
+			_, workers := splitConsensusRolesForRoom(room, true)
+			if len(workers) == 0 {
+				catalog := consensusWorkerRoleCatalog(room)
+				waitAndExit("await_participants_confirm",
+					fmt.Sprintf("【Jarvis】参与者为空，请按编号重新确认：\n%s\n\n`/debate participants %s 1,2,3`",
+						formatConsensusRoleCatalog(catalog, true), room.RoomID))
+				return
+			}
+			if room.Iteration <= 0 {
+				room.Iteration = 1
+			}
+			_ = e.SendBySessionKey(room.OwnerSessionKey, fmt.Sprintf("【Jarvis】阶段7/8：第 %d 轮分歧收敛讨论。", room.Iteration))
+			for _, role := range workers {
+				select {
+				case <-ctx.Done():
+					room.Status = DebateStatusStopped
+					room.StopReason = "manual_stop"
+					_ = e.debateStore.SaveRoom(room)
+					return
+				default:
+				}
+				reply, latency, err := e.askDebateRole(ctx, room, role, buildConsensusWorkerResolvePrompt(room, role, board, topic, room.Iteration))
+				if err != nil {
+					entry := DebateTranscriptEntry{
+						Round:    2 + room.Iteration,
+						Speaker:  role.Instance,
+						Role:     role.Role,
+						PostedBy: role.Instance,
+						Content:  "ERROR: " + err.Error(),
+					}
+					appendEntry(entry)
+					continue
+				}
+				display := extractDebateDisplayContent(reply)
+				if strings.TrimSpace(display) == "" {
+					display = reply
+				}
+				_ = e.sendDebateRoleSpeech(ctx, room, role, display)
+				entry := DebateTranscriptEntry{
+					Round:     2 + room.Iteration,
+					Speaker:   role.Instance,
+					Role:      role.Role,
+					PostedBy:  role.Instance,
+					Content:   display,
+					LatencyMS: latency,
+				}
+				appendEntry(entry)
+				ApplyRoleContribution(board, role, 2+room.Iteration, reply)
+				if board != nil {
+					_ = e.debateStore.SaveBlackboard(board)
+				}
+			}
+			room.Phase = consensusPhaseHostCheck
+			room.Status = DebateStatusRunning
+			room.StopReason = ""
+			_ = e.debateStore.SaveRoom(room)
+			continue
+
+		case consensusPhaseHostCheck:
+			if board != nil {
+				UpdateBlackboardWorkflow(board, DebateModeConsensus, consensusPhaseHostCheck, room.Iteration)
+				_ = e.debateStore.SaveBlackboard(board)
+			}
+			_ = e.SendBySessionKey(room.OwnerSessionKey, fmt.Sprintf("【Jarvis】阶段8/8：第 %d 轮共识判定（主持人收敛）。", room.Iteration))
+			hostReply, latency, err := e.askDebateRole(ctx, room, host, buildConsensusHostCheckPrompt(room, board, topic, room.Iteration))
+			if err == nil {
+				display := extractDebateDisplayContent(hostReply)
+				if strings.TrimSpace(display) == "" {
+					display = hostReply
+				}
+				_ = e.sendDebateRoleSpeech(ctx, room, host, display)
+				entry := DebateTranscriptEntry{
+					Round:     2 + room.Iteration,
+					Speaker:   host.Instance,
+					Role:      host.Role,
+					PostedBy:  host.Instance,
+					Content:   display,
+					LatencyMS: latency,
+				}
+				appendEntry(entry)
+				ApplyRoleContribution(board, host, 2+room.Iteration, hostReply)
+			}
+			if board != nil {
+				board.ConsensusPoints, board.Unresolved = summarizeConsensusFromBoard(board, room)
+				board.OpenQuestions = mergeUniqueQuestions(board.OpenQuestions, board.Unresolved, 16)
+				_ = e.debateStore.SaveBlackboard(board)
+			}
+			if board == nil || len(board.Unresolved) == 0 {
+				room.Phase = consensusPhaseFinalize
+				room.Status = DebateStatusRunning
+				room.StopReason = ""
+				_ = e.debateStore.SaveRoom(room)
+				continue
+			}
+			room.Iteration++
+			room.Phase = consensusPhaseAllResolve
+			room.Status = DebateStatusRunning
+			room.StopReason = ""
+			_ = e.debateStore.SaveRoom(room)
+			continue
+
+		case consensusPhaseFinalizeSingle, consensusPhaseFinalize:
+			room.Status = DebateStatusSummarize
+			room.StopReason = ""
 			_ = e.debateStore.SaveRoom(room)
 			if board != nil {
 				UpdateBlackboardWorkflow(board, DebateModeConsensus, room.Phase, room.Iteration)
 				_ = e.debateStore.SaveBlackboard(board)
 			}
-			unresolved := []string{}
-			if board != nil {
-				unresolved = board.Unresolved
+			if all, err := e.debateStore.LoadTranscript(room.RoomID); err == nil && len(all) > 0 {
+				transcript = all
 			}
-			_ = e.SendBySessionKey(room.OwnerSessionKey,
-				fmt.Sprintf("【Jarvis】已达到最大收敛轮次（%d），仍存在未统一项：%s\n请补充决策后继续：`/debate answer %s <你的决策>`", room.MaxRounds, strings.Join(nonEmptyOrDash(unresolved), "；"), room.RoomID))
+			summary := e.finalizeDebateSummary(room, transcript, board)
+			reportContent := renderDebateFinalReport(room, board, transcript, summary)
+			reportPath, reportErr := e.debateStore.SaveFinalReport(room.RoomID, reportContent)
+			if reportErr != nil {
+				slog.Warn("debate(consensus): save final report failed", "room_id", room.RoomID, "error", reportErr)
+			}
+			room.Status = DebateStatusCompleted
+			room.StopReason = ""
+			room.Phase = "completed"
+			_ = e.debateStore.SaveRoom(room)
+			if strings.TrimSpace(reportPath) != "" {
+				_ = e.SendBySessionKey(room.OwnerSessionKey, fmt.Sprintf("【Jarvis】讨论已结束，成果文档已生成：`%s`", reportPath))
+			}
 			return
-		}
 
-		_ = e.SendBySessionKey(room.OwnerSessionKey, fmt.Sprintf("【Jarvis】阶段4/6：第 %d 轮分歧收敛讨论。", room.Iteration))
-		for _, role := range workers {
-			select {
-			case <-ctx.Done():
-				room.Status = DebateStatusStopped
-				room.StopReason = "manual_stop"
-				_ = e.debateStore.SaveRoom(room)
-				return
-			default:
-			}
-			reply, latency, err := e.askDebateRole(ctx, room, role, buildConsensusWorkerResolvePrompt(room, role, board, topic, room.Iteration))
-			if err != nil {
-				entry := DebateTranscriptEntry{
-					Round:    2 + room.Iteration,
-					Speaker:  role.Instance,
-					Role:     role.Role,
-					PostedBy: role.Instance,
-					Content:  "ERROR: " + err.Error(),
-				}
-				_ = e.debateStore.AppendTranscript(room.RoomID, entry)
-				transcript = append(transcript, entry)
-				continue
-			}
-			display := extractDebateDisplayContent(reply)
-			if strings.TrimSpace(display) == "" {
-				display = reply
-			}
-			_ = e.sendDebateRoleSpeech(ctx, room, role, display)
-			entry := DebateTranscriptEntry{
-				Round:     2 + room.Iteration,
-				Speaker:   role.Instance,
-				Role:      role.Role,
-				PostedBy:  role.Instance,
-				Content:   display,
-				LatencyMS: latency,
-			}
-			_ = e.debateStore.AppendTranscript(room.RoomID, entry)
-			transcript = append(transcript, entry)
-			ApplyRoleContribution(board, role, 2+room.Iteration, reply)
-			if board != nil {
-				_ = e.debateStore.SaveBlackboard(board)
-			}
-		}
-
-		room.Phase = consensusPhaseHostCheck
-		_ = e.debateStore.SaveRoom(room)
-		if board != nil {
-			UpdateBlackboardWorkflow(board, DebateModeConsensus, consensusPhaseHostCheck, room.Iteration)
-			_ = e.debateStore.SaveBlackboard(board)
-		}
-
-		hostReply, latency, err := e.askDebateRole(ctx, room, host, buildConsensusHostCheckPrompt(room, board, topic, room.Iteration))
-		if err == nil {
-			display := extractDebateDisplayContent(hostReply)
-			if strings.TrimSpace(display) == "" {
-				display = hostReply
-			}
-			_ = e.sendDebateRoleSpeech(ctx, room, host, display)
-			entry := DebateTranscriptEntry{
-				Round:     2 + room.Iteration,
-				Speaker:   host.Instance,
-				Role:      host.Role,
-				PostedBy:  host.Instance,
-				Content:   display,
-				LatencyMS: latency,
-			}
-			_ = e.debateStore.AppendTranscript(room.RoomID, entry)
-			transcript = append(transcript, entry)
-			ApplyRoleContribution(board, host, 2+room.Iteration, hostReply)
-		}
-		if board != nil {
-			board.ConsensusPoints, board.Unresolved = summarizeConsensusFromBoard(board, room)
-			board.OpenQuestions = mergeUniqueQuestions(board.OpenQuestions, board.Unresolved, 12)
-			_ = e.debateStore.SaveBlackboard(board)
-		}
-		if board == nil || len(board.Unresolved) == 0 {
-			room.Phase = consensusPhaseFinalize
-			break
-		}
-		room.Iteration++
-		room.Phase = consensusPhaseAllResolve
-		_ = e.debateStore.SaveRoom(room)
-		if board != nil {
-			UpdateBlackboardWorkflow(board, DebateModeConsensus, consensusPhaseAllResolve, room.Iteration)
-			_ = e.debateStore.SaveBlackboard(board)
+		default:
+			room.Phase = consensusPhaseTopicRefine
+			room.Status = DebateStatusRunning
+			room.StopReason = ""
+			_ = e.debateStore.SaveRoom(room)
+			continue
 		}
 	}
-
-	room.Phase = consensusPhaseFinalize
-	room.Status = DebateStatusSummarize
-	room.StopReason = ""
-	_ = e.debateStore.SaveRoom(room)
-	if board != nil {
-		UpdateBlackboardWorkflow(board, DebateModeConsensus, consensusPhaseFinalize, room.Iteration)
-		_ = e.debateStore.SaveBlackboard(board)
-	}
-	if all, err := e.debateStore.LoadTranscript(room.RoomID); err == nil && len(all) > 0 {
-		transcript = all
-	}
-	e.finalizeDebateSummary(room, transcript, board)
-	room.Status = DebateStatusCompleted
-	room.StopReason = ""
-	room.Phase = "completed"
-	_ = e.debateStore.SaveRoom(room)
 }
 
-func (e *Engine) finalizeDebateSummary(room *DebateRoom, transcript []DebateTranscriptEntry, board *DebateBlackboard) {
+func (e *Engine) finalizeDebateSummary(room *DebateRoom, transcript []DebateTranscriptEntry, board *DebateBlackboard) string {
 	summary := e.buildDebateSummary(room, transcript, board)
 	summarySessionKey := buildRoleSessionKey(room.OwnerSessionKey, room.GroupChatID, room.RoomID, "jarvis_summary")
 	if askRes, err := e.AskSession(summarySessionKey, summary, 120*time.Second); err == nil {
@@ -614,29 +754,63 @@ func (e *Engine) finalizeDebateSummary(room *DebateRoom, transcript []DebateTran
 			summaryContent = fallbackDebateSummary(room, transcript)
 		}
 		_ = e.SendBySessionKey(room.OwnerSessionKey, "【Jarvis-总结】\n"+summaryContent)
-		return
+		return summaryContent
 	}
-	_ = e.SendBySessionKey(room.OwnerSessionKey, "【Jarvis-总结】\n"+fallbackDebateSummary(room, transcript))
+	fallback := fallbackDebateSummary(room, transcript)
+	_ = e.SendBySessionKey(room.OwnerSessionKey, "【Jarvis-总结】\n"+fallback)
+	return fallback
 }
 
 func splitConsensusRoles(roles []DebateRole) (DebateRole, []DebateRole) {
+	room := &DebateRoom{
+		Roles:    roles,
+		HostRole: "jarvis",
+	}
+	return splitConsensusRolesForRoom(room, false)
+}
+
+func splitConsensusRolesForRoom(room *DebateRoom, requireConfirmedWorkers bool) (DebateRole, []DebateRole) {
+	if room == nil {
+		return DebateRole{}, nil
+	}
+	roles := room.Roles
 	var host DebateRole
-	workers := make([]DebateRole, 0, len(roles))
+	hostKey := resolveDebateRoleKey(roles, room.HostRole)
+	if hostKey == "" {
+		hostKey = resolveDebateRoleKey(roles, "jarvis")
+	}
+	if hostKey == "" && len(roles) > 0 {
+		hostKey = roles[0].Role
+	}
+	workersAll := make([]DebateRole, 0, len(roles))
 	for _, r := range roles {
-		if strings.EqualFold(r.Role, "jarvis") {
+		if strings.EqualFold(r.Role, hostKey) {
 			host = r
 			continue
 		}
-		workers = append(workers, r)
+		workersAll = append(workersAll, r)
 	}
 	if strings.TrimSpace(host.Role) == "" && len(roles) > 0 {
 		host = roles[0]
-		workers = workers[:0]
+		workersAll = workersAll[:0]
 		for i := 1; i < len(roles); i++ {
-			workers = append(workers, roles[i])
+			workersAll = append(workersAll, roles[i])
 		}
 	}
-	return host, workers
+	if !requireConfirmedWorkers || len(room.ConfirmedParticipants) == 0 {
+		return host, workersAll
+	}
+	confirmSet := map[string]bool{}
+	for _, key := range normalizeDebateRoleList(roles, room.ConfirmedParticipants, host.Role) {
+		confirmSet[key] = true
+	}
+	filtered := make([]DebateRole, 0, len(workersAll))
+	for _, role := range workersAll {
+		if confirmSet[role.Role] {
+			filtered = append(filtered, role)
+		}
+	}
+	return host, filtered
 }
 
 func currentConsensusTopic(room *DebateRoom) string {
@@ -645,6 +819,9 @@ func currentConsensusTopic(room *DebateRoom) string {
 	}
 	if strings.TrimSpace(room.RefinedQuestion) != "" {
 		return strings.TrimSpace(room.RefinedQuestion)
+	}
+	if strings.TrimSpace(room.TopicDraft) != "" {
+		return strings.TrimSpace(room.TopicDraft)
 	}
 	return strings.TrimSpace(room.Question)
 }
@@ -659,6 +836,252 @@ func defaultClarifyQuestions(question string) []string {
 		qs = append(qs, "是否限定 Unity 版本、项目结构或已有框架约束？")
 	}
 	return qs
+}
+
+func buildConsensusTopicRefinePrompt(room *DebateRoom, board *DebateBlackboard, topic string) string {
+	var b strings.Builder
+	b.WriteString("你是主持人 Jarvis。当前任务：在不改变用户意图的前提下，自动完善用户议题。\n")
+	b.WriteString("要求：\n")
+	b.WriteString("1) 输出一版“增强议题草案”，必须可直接用于后续方案讨论；\n")
+	b.WriteString("2) 补齐目标、范围边界、交付物、验收口径；\n")
+	b.WriteString("3) 不要开始给解决方案，只做议题澄清与结构化；\n")
+	b.WriteString("4) 用中文，简洁。\n\n")
+	b.WriteString(fmt.Sprintf("用户原始议题：%s\n", topic))
+	if room != nil && strings.TrimSpace(room.Question) != "" && strings.TrimSpace(room.Question) != strings.TrimSpace(topic) {
+		b.WriteString(fmt.Sprintf("原始文本：%s\n", room.Question))
+	}
+	if board != nil && len(board.OpenQuestions) > 0 {
+		b.WriteString("历史待确认点：\n")
+		for i := 0; i < minInt(6, len(board.OpenQuestions)); i++ {
+			b.WriteString(fmt.Sprintf("- %s\n", truncateStr(board.OpenQuestions[i], 100)))
+		}
+	}
+	b.WriteString("\n输出格式：\n")
+	b.WriteString("【增强议题草案】\n")
+	b.WriteString("【补充假设】\n")
+	b.WriteString("【边界与不做项】\n")
+	b.WriteString("【验收标准】\n")
+	return b.String()
+}
+
+func buildConsensusTopicDraftFallback(topic string) string {
+	var b strings.Builder
+	b.WriteString("【增强议题草案】\n")
+	b.WriteString(fmt.Sprintf("围绕“%s”形成可执行讨论议题：明确目标产物、范围边界、关键依赖、验收标准，并输出可落地方案。\n", truncateStr(topic, 120)))
+	b.WriteString("【补充假设】\n")
+	b.WriteString("- 目标产物至少包含方案结构、执行步骤与验收口径。\n")
+	b.WriteString("【边界与不做项】\n")
+	b.WriteString("- 本轮仅讨论方案，不直接改代码或上线。\n")
+	b.WriteString("【验收标准】\n")
+	b.WriteString("- 结论可执行，且行动项包含 owner、deadline、验收标准。\n")
+	return strings.TrimSpace(b.String())
+}
+
+func extractTopicDraftFromReply(reply string) string {
+	visible := extractDebateDisplayContent(reply)
+	if strings.TrimSpace(visible) == "" {
+		visible = strings.TrimSpace(reply)
+	}
+	lines := strings.Split(strings.ReplaceAll(visible, "\r\n", "\n"), "\n")
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		if strings.Contains(line, "增强议题草案") || strings.Contains(line, "议题草案") || strings.Contains(line, "最终议题建议") {
+			line = strings.TrimPrefix(line, "【增强议题草案】")
+			line = strings.TrimPrefix(line, "【议题草案】")
+			line = strings.TrimPrefix(line, "【最终议题建议】")
+			line = strings.TrimPrefix(line, "增强议题草案：")
+			line = strings.TrimPrefix(line, "增强议题草案:")
+			line = strings.TrimPrefix(line, "议题草案：")
+			line = strings.TrimPrefix(line, "议题草案:")
+			line = strings.TrimSpace(line)
+			if line != "" {
+				return line
+			}
+		}
+	}
+	sections := splitStructuredSections(visible)
+	if v := strings.TrimSpace(sections["stance"]); v != "" {
+		return firstMeaningfulLine(v)
+	}
+	return firstMeaningfulLine(visible)
+}
+
+func normalizeTopicDraft(raw string) string {
+	raw = strings.TrimSpace(strings.ReplaceAll(raw, "\r\n", "\n"))
+	if raw == "" {
+		return ""
+	}
+	lines := strings.Split(raw, "\n")
+	clean := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		line = strings.TrimLeft(line, "-•*0123456789.、) ）")
+		if line == "" {
+			continue
+		}
+		clean = append(clean, line)
+	}
+	if len(clean) == 0 {
+		return ""
+	}
+	return truncateStr(strings.Join(clean, "；"), 500)
+}
+
+func consensusWorkerRoleCatalog(room *DebateRoom) []DebateRole {
+	if room == nil {
+		return nil
+	}
+	_, workers := splitConsensusRolesForRoom(room, false)
+	return workers
+}
+
+func formatConsensusRoleCatalog(roles []DebateRole, isZh bool) string {
+	if len(roles) == 0 {
+		if isZh {
+			return "（无可选角色）"
+		}
+		return "(no available roles)"
+	}
+	var b strings.Builder
+	for i, role := range roles {
+		idx := i + 1
+		name := emptyAs(strings.TrimSpace(role.DisplayName), role.Role)
+		identity := debateRoleIdentity(role, isZh)
+		if isZh {
+			b.WriteString(fmt.Sprintf("%d) %s（%s）- %s\n", idx, name, role.Role, identity))
+		} else {
+			b.WriteString(fmt.Sprintf("%d) %s (%s) - %s\n", idx, name, role.Role, identity))
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func debateRoleIdentity(role DebateRole, isZh bool) string {
+	key := strings.ToLower(strings.TrimSpace(role.Role))
+	if isZh {
+		switch key {
+		case "jarvis":
+			return "主持人 / 收敛官"
+		case "jianzhu":
+			return "架构与技术拆解"
+		case "wendan":
+			return "表达与方案文档"
+		case "xingzou":
+			return "执行路径与落地推进"
+		case "zhanggui":
+			return "资源评估与风险控制"
+		default:
+			return "专项顾问"
+		}
+	}
+	switch key {
+	case "jarvis":
+		return "host / convergence lead"
+	case "jianzhu":
+		return "architecture & technical decomposition"
+	case "wendan":
+		return "narrative & documentation design"
+	case "xingzou":
+		return "execution path & delivery"
+	case "zhanggui":
+		return "resource, cost and risk control"
+	default:
+		return "specialized advisor"
+	}
+}
+
+func summarizeClarificationAnswers(transcript []DebateTranscriptEntry) string {
+	if len(transcript) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, 8)
+	for _, item := range transcript {
+		if !strings.EqualFold(item.Role, "user") {
+			continue
+		}
+		content := strings.TrimSpace(item.Content)
+		if !strings.HasPrefix(content, "clarification_answer:") {
+			continue
+		}
+		content = strings.TrimSpace(strings.TrimPrefix(content, "clarification_answer:"))
+		if content == "" {
+			continue
+		}
+		lines = append(lines, truncateStr(content, 120))
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	start := 0
+	if len(lines) > 4 {
+		start = len(lines) - 4
+	}
+	return strings.Join(lines[start:], "；")
+}
+
+func buildConsensusClarifyPrompt(room *DebateRoom, board *DebateBlackboard, topic string, transcript []DebateTranscriptEntry) string {
+	var b strings.Builder
+	b.WriteString("你是主持人 Jarvis。当前处于“议题澄清”阶段。\n")
+	b.WriteString("目标：先理解用户议题并通过一问一答补齐信息；信息充分后再进入首轮方案回答。\n")
+	b.WriteString("规则：\n")
+	b.WriteString("1) 每轮最多只问 1 个最关键的问题；\n")
+	b.WriteString("2) 若信息已足够，必须明确标记无需继续澄清；\n")
+	b.WriteString("3) 输出不能菜单化，不能让用户选 1/2/3/4。\n\n")
+	b.WriteString(fmt.Sprintf("原始议题：%s\n", topic))
+	if room != nil && strings.TrimSpace(room.RefinedQuestion) != "" {
+		b.WriteString(fmt.Sprintf("当前议题草案：%s\n", room.RefinedQuestion))
+	}
+	if board != nil && len(board.OpenQuestions) > 0 {
+		b.WriteString("当前待确认问题：\n")
+		for i := 0; i < minInt(6, len(board.OpenQuestions)); i++ {
+			b.WriteString(fmt.Sprintf("- %s\n", truncateStr(board.OpenQuestions[i], 100)))
+		}
+	}
+	if len(transcript) > 0 {
+		b.WriteString("最近澄清对话：\n")
+		snippets := make([]string, 0, 10)
+		for i := len(transcript) - 1; i >= 0 && len(snippets) < 10; i-- {
+			item := transcript[i]
+			role := strings.ToLower(strings.TrimSpace(item.Role))
+			if role != "user" && role != "jarvis" {
+				continue
+			}
+			content := strings.TrimSpace(item.Content)
+			if role == "user" && strings.HasPrefix(content, "clarification_answer:") {
+				content = strings.TrimSpace(strings.TrimPrefix(content, "clarification_answer:"))
+				if content == "" {
+					continue
+				}
+				snippets = append(snippets, fmt.Sprintf("- [用户] %s", truncateStr(content, 140)))
+				continue
+			}
+			if role == "jarvis" {
+				snippets = append(snippets, fmt.Sprintf("- [主持人] %s", truncateStr(content, 140)))
+			}
+		}
+		for i := len(snippets) - 1; i >= 0; i-- {
+			b.WriteString(snippets[i] + "\n")
+		}
+	}
+
+	b.WriteString("\n输出格式（必须严格遵守）：\n")
+	b.WriteString("A) 给用户的澄清回复：\n")
+	b.WriteString("- 若 need_more=true：只提 1 个问题；\n")
+	b.WriteString("- 若 need_more=false：明确告知“澄清完成”，并给出最终详细议题。\n\n")
+	b.WriteString("B) 决策 JSON：\n```json\n")
+	b.WriteString("{\n")
+	b.WriteString("  \"type\": \"clarify_decision\",\n")
+	b.WriteString("  \"need_more\": true,\n")
+	b.WriteString("  \"question\": \"\",\n")
+	b.WriteString("  \"refined_topic\": \"\",\n")
+	b.WriteString("  \"missing\": [],\n")
+	b.WriteString("  \"summary\": \"\"\n")
+	b.WriteString("}\n")
+	b.WriteString("```\n")
+	return b.String()
 }
 
 func (e *Engine) askDebateRole(ctx context.Context, room *DebateRoom, role DebateRole, prompt string) (string, int64, error) {
@@ -912,10 +1335,11 @@ func summarizeConsensusFromBoard(board *DebateBlackboard, room *DebateRoom) ([]s
 	agreed := make([]string, 0, 8)
 	unresolved := make([]string, 0, 8)
 
-	for _, role := range room.Roles {
-		if strings.EqualFold(role.Role, "jarvis") {
-			continue
-		}
+	_, roles := splitConsensusRolesForRoom(room, true)
+	if len(roles) == 0 {
+		_, roles = splitConsensusRolesForRoom(room, false)
+	}
+	for _, role := range roles {
 		n, ok := board.RoleNotes[role.Role]
 		if !ok {
 			continue
@@ -1320,11 +1744,16 @@ func (e *Engine) buildDebateSummary(room *DebateRoom, transcript []DebateTranscr
 	topic := room.Question
 	if strings.TrimSpace(room.RefinedQuestion) != "" {
 		topic = room.RefinedQuestion
+	} else if strings.TrimSpace(room.TopicDraft) != "" {
+		topic = room.TopicDraft
 	}
 	b.WriteString(fmt.Sprintf("讨论主题：%s\n", topic))
 	if board != nil {
+		if strings.TrimSpace(board.TopicDraft) != "" {
+			b.WriteString(fmt.Sprintf("主持人增强议题草案：%s\n", board.TopicDraft))
+		}
 		if strings.TrimSpace(board.RefinedTopic) != "" {
-			b.WriteString(fmt.Sprintf("黑板澄清主题：%s\n", board.RefinedTopic))
+			b.WriteString(fmt.Sprintf("黑板最终议题：%s\n", board.RefinedTopic))
 		}
 		if strings.TrimSpace(board.Phase) != "" {
 			b.WriteString(fmt.Sprintf("当前流程阶段：%s（iteration=%d）\n", board.Phase, board.Iteration))
@@ -1360,7 +1789,7 @@ func (e *Engine) buildDebateSummary(room *DebateRoom, transcript []DebateTranscr
 func fallbackDebateSummary(room *DebateRoom, transcript []DebateTranscriptEntry) string {
 	var b strings.Builder
 	b.WriteString("1) 最终结论\n")
-	b.WriteString(fmt.Sprintf("- 主题已收敛：%s\n", room.Question))
+	b.WriteString(fmt.Sprintf("- 主题已收敛：%s\n", currentConsensusTopic(room)))
 	max := minInt(3, len(transcript))
 	for i := 0; i < max; i++ {
 		t := transcript[len(transcript)-max+i]
@@ -1372,6 +1801,110 @@ func fallbackDebateSummary(room *DebateRoom, transcript []DebateTranscriptEntry)
 	b.WriteString("\n3) 行动项\n")
 	b.WriteString(fmt.Sprintf("- owner: Jarvis, deadline: %s, 验收标准: 输出可执行任务清单（含负责人、里程碑、验收标准）并完成确认。\n", time.Now().Add(24*time.Hour).Format("2006-01-02")))
 	return b.String()
+}
+
+func renderDebateFinalReport(room *DebateRoom, board *DebateBlackboard, transcript []DebateTranscriptEntry, summary string) string {
+	var b strings.Builder
+	now := time.Now().Format("2006-01-02 15:04:05")
+	b.WriteString("# 多Bot讨论成果汇总\n\n")
+	b.WriteString(fmt.Sprintf("- 生成时间：%s\n", now))
+	if room != nil {
+		b.WriteString(fmt.Sprintf("- 房间ID：`%s`\n", room.RoomID))
+		b.WriteString(fmt.Sprintf("- 模式：`%s`\n", emptyAs(room.Mode, DebateModeClassic)))
+		b.WriteString(fmt.Sprintf("- 主持人：`%s`\n", emptyAs(room.HostRole, "jarvis")))
+		b.WriteString(fmt.Sprintf("- 参与者（已确认）：%s\n", strings.Join(nonEmptyOrDash(room.ConfirmedParticipants), "、")))
+		b.WriteString(fmt.Sprintf("- 会话状态：`%s`\n", room.Status))
+	}
+	rawTopic := ""
+	if room != nil {
+		rawTopic = strings.TrimSpace(room.Question)
+	}
+	draftTopic := ""
+	if board != nil && strings.TrimSpace(board.TopicDraft) != "" {
+		draftTopic = strings.TrimSpace(board.TopicDraft)
+	} else if room != nil {
+		draftTopic = strings.TrimSpace(room.TopicDraft)
+	}
+	finalTopic := ""
+	if board != nil && strings.TrimSpace(board.RefinedTopic) != "" {
+		finalTopic = strings.TrimSpace(board.RefinedTopic)
+	} else if room != nil {
+		finalTopic = strings.TrimSpace(room.RefinedQuestion)
+	}
+	if strings.TrimSpace(finalTopic) == "" && room != nil {
+		finalTopic = currentConsensusTopic(room)
+	}
+	b.WriteString(fmt.Sprintf("- 最终讨论主题：%s\n\n", emptyAs(finalTopic, "-")))
+
+	b.WriteString("## 议题演进\n\n")
+	b.WriteString(fmt.Sprintf("- 用户原始议题：%s\n", emptyAs(rawTopic, "-")))
+	b.WriteString(fmt.Sprintf("- 主持人增强议题草案：%s\n", emptyAs(draftTopic, "-")))
+	b.WriteString(fmt.Sprintf("- 用户最终议题：%s\n\n", emptyAs(finalTopic, "-")))
+
+	if board != nil && strings.TrimSpace(board.HostFirstProposal) != "" {
+		b.WriteString("## 主持人首轮方案\n\n")
+		b.WriteString(board.HostFirstProposal + "\n\n")
+		if len(board.HostFirstProposalRisks) > 0 {
+			b.WriteString("### 首轮识别风险\n")
+			for _, line := range board.HostFirstProposalRisks {
+				if strings.TrimSpace(line) == "" {
+					continue
+				}
+				b.WriteString(fmt.Sprintf("- %s\n", line))
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	b.WriteString("## 用户评审\n\n")
+	if room != nil {
+		b.WriteString(fmt.Sprintf("- 评审结论：`%s`\n", emptyAs(room.UserReviewStatus, "pending")))
+		if strings.TrimSpace(room.UserReviewFeedback) != "" {
+			b.WriteString(fmt.Sprintf("- 评审反馈：%s\n", room.UserReviewFeedback))
+		}
+	}
+	b.WriteString("\n")
+
+	b.WriteString("## 最终共识总结\n\n")
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		summary = "（无模型总结，已使用兜底流程）"
+	}
+	b.WriteString(summary + "\n\n")
+
+	if board != nil {
+		if len(board.ConsensusPoints) > 0 {
+			b.WriteString("## 已达成一致\n\n")
+			for _, item := range board.ConsensusPoints {
+				if strings.TrimSpace(item) == "" {
+					continue
+				}
+				b.WriteString(fmt.Sprintf("- %s\n", item))
+			}
+			b.WriteString("\n")
+		}
+		if len(board.Unresolved) > 0 {
+			b.WriteString("## 未达成一致（供后续跟进）\n\n")
+			for _, item := range board.Unresolved {
+				if strings.TrimSpace(item) == "" {
+					continue
+				}
+				b.WriteString(fmt.Sprintf("- %s\n", item))
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	b.WriteString("## 讨论轨迹（最近 12 条）\n\n")
+	start := 0
+	if len(transcript) > 12 {
+		start = len(transcript) - 12
+	}
+	for i := start; i < len(transcript); i++ {
+		item := transcript[i]
+		b.WriteString(fmt.Sprintf("- [R%d][%s] %s\n", item.Round, emptyAs(item.Role, item.Speaker), truncateStr(item.Content, 160)))
+	}
+	return strings.TrimSpace(b.String()) + "\n"
 }
 
 func (e *Engine) resolveRoleSocketPath(role DebateRole) string {
