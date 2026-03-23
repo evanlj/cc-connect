@@ -20,6 +20,22 @@ const (
 
 var squadANSIColorPattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
 
+var squadReviewNoiseKeywords = []string{
+	"licensing::module",
+	"access token is unavailable",
+	"android sdk command-line tools",
+	"native extension for android target not found",
+	"unityconnect",
+	"request timed out while processing request \"https://public-cdn.cloud.unity3d.com",
+}
+
+type squadReviewFilterStats struct {
+	DroppedTotal      int
+	DroppedNoise      int
+	DroppedUnanchored int
+	DroppedOutOfScope int
+}
+
 func (e *Engine) startSquadRunner(runID string) error {
 	if e.squadStore == nil || !e.squadStore.Enabled() {
 		return fmt.Errorf("squad store is disabled")
@@ -194,6 +210,10 @@ func (e *Engine) runSquadPlanning(ctx context.Context, run *SquadRun) error {
 	b.WriteString(fmt.Sprintf("\n确认计划：`/squad approve-plan %s`", run.RunID))
 	b.WriteString(fmt.Sprintf("\n说明：计划确认后，每个任务执行前都需要你确认：`/squad approve-task %s <task_id>`", run.RunID))
 	_ = e.SendBySessionKey(run.OwnerSessionKey, b.String())
+	if err := e.autoSendMarkdownArtifact(run.OwnerSessionKey, planPath); err != nil {
+		_ = e.SendBySessionKey(run.OwnerSessionKey, fmt.Sprintf("【Squad】计划文档自动发送失败：`%s`\n原因：%s",
+			filepath.ToSlash(planPath), truncateStr(err.Error(), 180)))
+	}
 	return nil
 }
 
@@ -280,12 +300,13 @@ func (e *Engine) runSquadExecutionLoop(ctx context.Context, run *SquadRun) error
 		if err := e.squadStore.SaveRun(run); err != nil {
 			return fmt.Errorf("save run before review: %w", err)
 		}
-		reviewReply, _, err := e.askSquadRole(ctx, run, run.ReviewerRole, buildSquadReviewerPrompt(run, task, execReply))
+		reviewReply, _, err := e.askSquadRole(ctx, run, run.ReviewerRole, buildSquadReviewerPrompt(run, task, execReply, changedFiles, testResult))
 		if err != nil {
 			return fmt.Errorf("reviewer ask failed (task=%s): %w", task.ID, err)
 		}
 
 		reviewResult, failedReasons, suggestions := parseReviewerFindings(reviewReply)
+		reviewResult, failedReasons, suggestions, reviewFilterStats := filterReviewerFindingsByScope(task, changedFiles, reviewResult, failedReasons, suggestions)
 		cp := &SquadCheckpoint{
 			TaskID:        task.ID,
 			TaskTitle:     task.Title,
@@ -306,6 +327,11 @@ func (e *Engine) runSquadExecutionLoop(ctx context.Context, run *SquadRun) error
 			"round":                execRound,
 			"review_result":        reviewResult,
 			"failed_reasons_count": len(failedReasons),
+			"review_scope":         "plan_code_doc_only",
+			"filtered_reasons":     reviewFilterStats.DroppedTotal,
+			"noise_reasons":        reviewFilterStats.DroppedNoise,
+			"out_of_scope_reasons": reviewFilterStats.DroppedOutOfScope,
+			"unanchored_reasons":   reviewFilterStats.DroppedUnanchored,
 			"checkpoint":           cpPath,
 		})
 		run.Status = SquadStatusWaiting
@@ -331,6 +357,14 @@ func (e *Engine) runSquadExecutionLoop(ctx context.Context, run *SquadRun) error
 		}
 		if len(suggestions) > 0 {
 			notify.WriteString(fmt.Sprintf("- suggestions: %s\n", strings.Join(suggestions, "；")))
+		}
+		if reviewFilterStats.DroppedTotal > 0 {
+			notify.WriteString(fmt.Sprintf("- reviewer_filter: 已过滤 %d 条越界原因（噪音:%d / 范围外:%d / 无锚点:%d）\n",
+				reviewFilterStats.DroppedTotal,
+				reviewFilterStats.DroppedNoise,
+				reviewFilterStats.DroppedOutOfScope,
+				reviewFilterStats.DroppedUnanchored,
+			))
 		}
 		notify.WriteString(fmt.Sprintf("\n裁决通过并继续下一步：`/squad judge-review %s pass`", run.RunID))
 		notify.WriteString(fmt.Sprintf("\n裁决不通过并给出原因/修改方案：`/squad judge-review %s rework <原因与修改方案>`", run.RunID))
@@ -364,6 +398,10 @@ func (e *Engine) runSquadExecutionLoop(ctx context.Context, run *SquadRun) error
 
 	_ = e.squadProc.StopRun(run.RunID)
 	_ = e.SendBySessionKey(run.OwnerSessionKey, fmt.Sprintf("【Squad】任务完成：`%s`\n报告：`%s`", run.RunID, filepath.ToSlash(reportPath)))
+	if err := e.autoSendMarkdownArtifact(run.OwnerSessionKey, reportPath); err != nil {
+		_ = e.SendBySessionKey(run.OwnerSessionKey, fmt.Sprintf("【Squad】成果文档自动发送失败：`%s`\n原因：%s",
+			filepath.ToSlash(reportPath), truncateStr(err.Error(), 180)))
+	}
 	return nil
 }
 
@@ -573,7 +611,7 @@ func buildSquadExecutorPrompt(run *SquadRun, task SquadTask, round int) string {
 	return b.String()
 }
 
-func buildSquadReviewerPrompt(run *SquadRun, task SquadTask, executorReply string) string {
+func buildSquadReviewerPrompt(run *SquadRun, task SquadTask, executorReply string, changedFiles []string, testResult string) string {
 	var b strings.Builder
 	b.WriteString("你是代码审核者（Reviewer）。请审核执行者本轮产出，但不要替用户做“通过/不通过”裁决。\n")
 	b.WriteString(fmt.Sprintf("仓库路径：%s\n", run.RepoPath))
@@ -582,9 +620,28 @@ func buildSquadReviewerPrompt(run *SquadRun, task SquadTask, executorReply strin
 	if strings.TrimSpace(task.Acceptance) != "" {
 		b.WriteString(fmt.Sprintf("验收标准：%s\n", task.Acceptance))
 	}
+	if len(changedFiles) > 0 {
+		b.WriteString("执行者声明变更文件（仅以下范围可审）：\n")
+		for i, f := range changedFiles {
+			if i >= 20 {
+				b.WriteString(fmt.Sprintf("- ... 其余 %d 项省略\n", len(changedFiles)-i))
+				break
+			}
+			b.WriteString(fmt.Sprintf("- %s\n", strings.TrimSpace(f)))
+		}
+	}
+	if strings.TrimSpace(testResult) != "" {
+		b.WriteString(fmt.Sprintf("执行者测试结论：%s\n", truncateStr(strings.TrimSpace(testResult), 300)))
+	}
 	b.WriteString("\n执行者输出如下：\n")
 	b.WriteString(truncateStr(executorReply, 4000))
 	b.WriteString("\n\n")
+	b.WriteString("审核权限硬门禁（A规则，必须遵守）：\n")
+	b.WriteString("1) 仅审核“代码实现 + Doc 文档”是否符合当前任务计划（objective/acceptance）；\n")
+	b.WriteString("2) 仅允许基于执行者声明变更文件与 Doc 文件给出问题；不得扩展到全仓扫描；\n")
+	b.WriteString("3) 禁止把环境噪音当作 failed_reasons（例如 Licensing/Android SDK/UnityConnect/网络超时）；\n")
+	b.WriteString("4) 每条 failed_reasons 必须带锚点格式：`[ACC:验收点] [FILE:文件路径] 问题描述`；\n")
+	b.WriteString("5) 若未发现阻塞问题，failed_reasons 必须返回空数组。\n\n")
 	b.WriteString("请只输出 JSON（不要额外解释）：\n")
 	b.WriteString("{\"review_result\":\"\",\"failed_reasons\":[\"...\"],\"suggestions\":[\"...\"]}\n")
 	b.WriteString("规则：\n")
@@ -592,6 +649,164 @@ func buildSquadReviewerPrompt(run *SquadRun, task SquadTask, executorReply strin
 	b.WriteString("2) 不要输出 PASS/REWORK 或“最终是否通过”的裁决；\n")
 	b.WriteString("3) failed_reasons 仅写导致“不通过”的具体问题；若未发现不通过项请返回空数组。")
 	return b.String()
+}
+
+func filterReviewerFindingsByScope(task SquadTask, changedFiles []string, reviewResult string, failedReasons []string, suggestions []string) (string, []string, []string, squadReviewFilterStats) {
+	_ = task
+	stats := squadReviewFilterStats{}
+	allowedFiles := make(map[string]struct{}, len(changedFiles))
+	for _, f := range changedFiles {
+		key := normalizeSquadFileKey(f)
+		if key == "" {
+			continue
+		}
+		allowedFiles[key] = struct{}{}
+	}
+
+	filteredReasons := make([]string, 0, len(failedReasons))
+	for _, reason := range failedReasons {
+		reason = strings.TrimSpace(reason)
+		if reason == "" {
+			continue
+		}
+		if containsSquadReviewNoise(reason) {
+			stats.DroppedTotal++
+			stats.DroppedNoise++
+			continue
+		}
+		if !hasSquadReviewAnchor(reason, "acc") || !hasSquadReviewAnchor(reason, "file") {
+			stats.DroppedTotal++
+			stats.DroppedUnanchored++
+			continue
+		}
+		fileAnchor := extractSquadReviewAnchorValue(reason, "file")
+		if fileAnchor == "" {
+			stats.DroppedTotal++
+			stats.DroppedUnanchored++
+			continue
+		}
+		if len(allowedFiles) > 0 && !isSquadFileInScope(fileAnchor, allowedFiles) {
+			stats.DroppedTotal++
+			stats.DroppedOutOfScope++
+			continue
+		}
+		filteredReasons = append(filteredReasons, reason)
+	}
+
+	filteredSuggestions := make([]string, 0, len(suggestions))
+	for _, suggestion := range suggestions {
+		suggestion = strings.TrimSpace(suggestion)
+		if suggestion == "" {
+			continue
+		}
+		if containsSquadReviewNoise(suggestion) {
+			continue
+		}
+		filteredSuggestions = append(filteredSuggestions, suggestion)
+	}
+
+	filteredReasons = normalizeStringList(filteredReasons)
+	filteredSuggestions = normalizeStringList(filteredSuggestions)
+
+	if len(filteredReasons) == 0 && reviewResultImpliesBlocking(reviewResult) {
+		reviewResult = "未发现可阻塞的计划偏差（仅基于代码实现与文档计划一致性审查，由用户最终裁决）"
+	}
+	return strings.TrimSpace(reviewResult), filteredReasons, filteredSuggestions, stats
+}
+
+func containsSquadReviewNoise(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" {
+		return false
+	}
+	for _, kw := range squadReviewNoiseKeywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSquadReviewAnchor(reason, key string) bool {
+	reason = strings.ToLower(strings.TrimSpace(reason))
+	key = strings.ToLower(strings.TrimSpace(key))
+	if reason == "" || key == "" {
+		return false
+	}
+	return strings.Contains(reason, "["+key+":")
+}
+
+func extractSquadReviewAnchorValue(reason, key string) string {
+	reason = strings.TrimSpace(reason)
+	key = strings.ToLower(strings.TrimSpace(key))
+	if reason == "" || key == "" {
+		return ""
+	}
+	lower := strings.ToLower(reason)
+	tag := "[" + key + ":"
+	start := strings.Index(lower, tag)
+	if start < 0 {
+		return ""
+	}
+	valueStart := start + len(tag)
+	if valueStart >= len(reason) {
+		return ""
+	}
+	endOffset := strings.Index(reason[valueStart:], "]")
+	if endOffset < 0 {
+		return ""
+	}
+	return strings.TrimSpace(reason[valueStart : valueStart+endOffset])
+}
+
+func normalizeSquadFileKey(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	path = strings.ReplaceAll(path, "\\", "/")
+	path = strings.TrimPrefix(path, "./")
+	path = strings.TrimPrefix(path, ".\\")
+	return strings.ToLower(path)
+}
+
+func isSquadFileInScope(anchorFile string, allowedFiles map[string]struct{}) bool {
+	anchor := normalizeSquadFileKey(anchorFile)
+	if anchor == "" {
+		return false
+	}
+	if _, ok := allowedFiles[anchor]; ok {
+		return true
+	}
+	for candidate := range allowedFiles {
+		if strings.HasSuffix(anchor, candidate) || strings.HasSuffix(candidate, anchor) {
+			return true
+		}
+	}
+	return false
+}
+
+func reviewResultImpliesBlocking(reviewResult string) bool {
+	text := strings.ToLower(strings.TrimSpace(reviewResult))
+	if text == "" {
+		return true
+	}
+	blockingHints := []string{
+		"发现问题",
+		"未通过",
+		"阻塞",
+		"缺失",
+		"需返工",
+		"rework",
+		"failed",
+		"blocking",
+	}
+	for _, hint := range blockingHints {
+		if strings.Contains(text, strings.ToLower(hint)) {
+			return true
+		}
+	}
+	return false
 }
 
 func renderSquadFinalReport(run *SquadRun, checkpoints []SquadCheckpoint) string {

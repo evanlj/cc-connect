@@ -3,6 +3,8 @@ package core
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -183,6 +185,78 @@ func (e *Engine) SendBySessionKey(sessionKey, content string) error {
 		if err := target.Send(e.ctx, replyCtx, chunk); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// SendFileBySessionKey proactively uploads and sends a local file to a session.
+// This requires platform support for ReplyContextReconstructor + FileSender.
+func (e *Engine) SendFileBySessionKey(sessionKey, filePath string) error {
+	sessionKey = strings.TrimSpace(sessionKey)
+	filePath = strings.TrimSpace(filePath)
+	if sessionKey == "" {
+		return fmt.Errorf("session_key is required")
+	}
+	if filePath == "" {
+		return fmt.Errorf("file_path is required")
+	}
+	if _, err := os.Stat(filePath); err != nil {
+		return fmt.Errorf("file not found: %w", err)
+	}
+
+	platformName := ""
+	if idx := strings.Index(sessionKey, ":"); idx > 0 {
+		platformName = sessionKey[:idx]
+	}
+	if platformName == "" {
+		return fmt.Errorf("invalid session key %q", sessionKey)
+	}
+
+	var target Platform
+	for _, p := range e.platforms {
+		if p.Name() == platformName {
+			target = p
+			break
+		}
+	}
+	if target == nil {
+		return fmt.Errorf("platform %q not found for session %q", platformName, sessionKey)
+	}
+
+	rc, ok := target.(ReplyContextReconstructor)
+	if !ok {
+		return fmt.Errorf("%w: platform does not support proactive messaging", ErrNotSupported)
+	}
+	fs, ok := target.(FileSender)
+	if !ok {
+		return fmt.Errorf("%w: platform does not support file sending", ErrNotSupported)
+	}
+
+	replyCtx, err := rc.ReconstructReplyCtx(sessionKey)
+	if err != nil {
+		return fmt.Errorf("reconstruct reply context: %w", err)
+	}
+	if err := fs.SendFile(e.ctx, replyCtx, filePath); err != nil {
+		return err
+	}
+	return nil
+}
+
+// autoSendMarkdownArtifact attempts to push a generated markdown file to chat.
+// It silently skips non-markdown files and unsupported platforms.
+func (e *Engine) autoSendMarkdownArtifact(sessionKey, filePath string) error {
+	filePath = strings.TrimSpace(filePath)
+	if filePath == "" {
+		return nil
+	}
+	if !strings.EqualFold(filepath.Ext(filePath), ".md") {
+		return nil
+	}
+	if err := e.SendFileBySessionKey(sessionKey, filePath); err != nil {
+		if errors.Is(err, ErrNotSupported) {
+			return nil
+		}
+		return err
 	}
 	return nil
 }

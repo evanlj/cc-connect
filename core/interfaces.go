@@ -24,6 +24,12 @@ type ReplyContextReconstructor interface {
 	ReconstructReplyCtx(sessionKey string) (any, error)
 }
 
+// FileSender is an optional interface for platforms that support sending
+// local files (attachment style) into chat sessions.
+type FileSender interface {
+	SendFile(ctx context.Context, replyCtx any, filePath string) error
+}
+
 // SessionEnvInjector is an optional interface for agents that accept
 // per-session environment variables (e.g. CC_PROJECT, CC_SESSION_KEY).
 type SessionEnvInjector interface {

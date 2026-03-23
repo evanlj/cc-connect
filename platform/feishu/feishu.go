@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -537,6 +539,73 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	return nil
 }
 
+// SendFile uploads a local file and sends it to the same chat as an attachment.
+func (p *Platform) SendFile(ctx context.Context, rctx any, filePath string) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("feishu: invalid reply context type %T", rctx)
+	}
+
+	filePath = strings.TrimSpace(filePath)
+	if filePath == "" {
+		return fmt.Errorf("feishu: file path is empty")
+	}
+	if rc.chatID == "" {
+		return fmt.Errorf("feishu: chatID is empty, cannot send file")
+	}
+
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return fmt.Errorf("feishu: stat file: %w", err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("feishu: path is a directory, not a file: %s", filePath)
+	}
+
+	fileType := detectFeishuUploadFileType(filePath)
+	fileName := filepath.Base(filePath)
+
+	uploadBody, err := larkim.NewCreateFilePathReqBodyBuilder().
+		FileType(fileType).
+		FileName(fileName).
+		FilePath(filePath).
+		Build()
+	if err != nil {
+		return fmt.Errorf("feishu: build upload request: %w", err)
+	}
+
+	uploadResp, err := p.client.Im.File.Create(ctx, larkim.NewCreateFileReqBuilder().
+		Body(uploadBody).
+		Build())
+	if err != nil {
+		return fmt.Errorf("feishu: upload file api call: %w", err)
+	}
+	if !uploadResp.Success() {
+		return fmt.Errorf("feishu: upload file failed code=%d msg=%s", uploadResp.Code, uploadResp.Msg)
+	}
+	if uploadResp.Data == nil || uploadResp.Data.FileKey == nil || strings.TrimSpace(*uploadResp.Data.FileKey) == "" {
+		return fmt.Errorf("feishu: upload file succeeded but file_key is empty")
+	}
+
+	fileKey := strings.TrimSpace(*uploadResp.Data.FileKey)
+	contentBytes, _ := json.Marshal(map[string]string{"file_key": fileKey})
+	sendResp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(rc.chatID).
+			MsgType(larkim.MsgTypeFile).
+			Content(string(contentBytes)).
+			Build()).
+		Build())
+	if err != nil {
+		return fmt.Errorf("feishu: send file api call: %w", err)
+	}
+	if !sendResp.Success() {
+		return fmt.Errorf("feishu: send file failed code=%d msg=%s", sendResp.Code, sendResp.Msg)
+	}
+	return nil
+}
+
 // downloadImage fetches an image from Feishu by message_id and image_key.
 func (p *Platform) downloadImage(messageID, imageKey string) ([]byte, string, error) {
 	resp, err := p.client.Im.MessageResource.Get(context.Background(),
@@ -599,6 +668,25 @@ func detectMimeType(data []byte) string {
 		}
 	}
 	return "image/png"
+}
+
+func detectFeishuUploadFileType(filePath string) string {
+	switch strings.ToLower(filepath.Ext(strings.TrimSpace(filePath))) {
+	case ".opus", ".ogg", ".oga":
+		return larkim.FileTypeOpus
+	case ".mp4":
+		return larkim.FileTypeMp4
+	case ".pdf":
+		return larkim.FileTypePdf
+	case ".doc", ".docx":
+		return larkim.FileTypeDoc
+	case ".xls", ".xlsx", ".csv":
+		return larkim.FileTypeXls
+	case ".ppt", ".pptx":
+		return larkim.FileTypePpt
+	default:
+		return larkim.FileTypeStream
+	}
 }
 
 // buildReplyContent decides between plain text and interactive card based on content.
@@ -1093,11 +1181,11 @@ func buildSquadControlCardJSON(defaultRunID string) string {
 			"margin":     "8px 0",
 		},
 		map[string]any{
-			"tag":         "markdown",
-			"element_id":  "sq_tpl_hint",
-			"content":     "**一键模板**（提交时带入当前 Run ID；未填则用 RUN_ID 占位）",
-			"text_align":  "left",
-			"text_size":   "normal",
+			"tag":        "markdown",
+			"element_id": "sq_tpl_hint",
+			"content":    "**一键模板**（提交时带入当前 Run ID；未填则用 RUN_ID 占位）",
+			"text_align": "left",
+			"text_size":  "normal",
 		},
 		squadV2Row(
 			squadV2Col("auto", squadV2SubmitBtn("sq_tpl_start", "default", "启动模板", map[string]any{"cc_action": "squad_tpl", "tpl": "start"})),
@@ -1126,11 +1214,11 @@ func buildSquadControlCardJSON(defaultRunID string) string {
 		"body": map[string]any{
 			"elements": []any{
 				map[string]any{
-					"tag":         "markdown",
-					"element_id":  "sq_intro",
-					"content":     intro,
-					"text_align":  "left",
-					"text_size":   "normal",
+					"tag":        "markdown",
+					"element_id": "sq_intro",
+					"content":    intro,
+					"text_align": "left",
+					"text_size":  "normal",
 				},
 				map[string]any{
 					"tag":        "form",

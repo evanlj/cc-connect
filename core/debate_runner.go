@@ -723,6 +723,10 @@ func (e *Engine) runConsensusDebateRoom(ctx context.Context, room *DebateRoom) {
 			_ = e.debateStore.SaveRoom(room)
 			if strings.TrimSpace(reportPath) != "" {
 				_ = e.SendBySessionKey(room.OwnerSessionKey, fmt.Sprintf("【Jarvis】讨论已结束，成果文档已生成：`%s`", reportPath))
+				if err := e.autoSendMarkdownArtifact(room.OwnerSessionKey, reportPath); err != nil {
+					_ = e.SendBySessionKey(room.OwnerSessionKey, fmt.Sprintf("【Jarvis】成果文档自动发送失败：`%s`\n原因：%s",
+						filepath.ToSlash(reportPath), truncateStr(err.Error(), 180)))
+				}
 			}
 			return
 

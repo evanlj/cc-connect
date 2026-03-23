@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -83,8 +84,9 @@ func (s *stubAgentSession) Close() error {
 type stubPlatform struct {
 	name string
 
-	mu   sync.Mutex
-	sent []string
+	mu    sync.Mutex
+	sent  []string
+	files []string
 }
 
 func (p *stubPlatform) Name() string { return p.name }
@@ -102,9 +104,27 @@ func (p *stubPlatform) Send(_ context.Context, _ any, content string) error {
 	return nil
 }
 
+func (p *stubPlatform) SendFile(_ context.Context, _ any, filePath string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.files = append(p.files, filePath)
+	return nil
+}
+
 func (p *stubPlatform) Stop() error { return nil }
 
 func (p *stubPlatform) ReconstructReplyCtx(_ string) (any, error) { return "ctx", nil }
+
+type stubPlatformNoFile struct {
+	name string
+}
+
+func (p *stubPlatformNoFile) Name() string                                   { return p.name }
+func (p *stubPlatformNoFile) Start(_ MessageHandler) error                   { return nil }
+func (p *stubPlatformNoFile) Reply(_ context.Context, _ any, _ string) error { return nil }
+func (p *stubPlatformNoFile) Send(_ context.Context, _ any, _ string) error  { return nil }
+func (p *stubPlatformNoFile) Stop() error                                    { return nil }
+func (p *stubPlatformNoFile) ReconstructReplyCtx(_ string) (any, error)      { return "ctx", nil }
 
 func TestEngineAskSessionSuccess(t *testing.T) {
 	events := make(chan Event, 4)
@@ -164,6 +184,98 @@ func TestEngineSendBySessionKey(t *testing.T) {
 	}
 	if platform.sent[0] != "hello" {
 		t.Fatalf("sent content mismatch: %q", platform.sent[0])
+	}
+}
+
+func TestEngineSendFileBySessionKey(t *testing.T) {
+	platform := &stubPlatform{name: "feishu"}
+	engine := NewEngine("send-file-test", &stubAgent{session: newStubAgentSession(make(chan Event))}, []Platform{platform}, "", LangEnglish)
+
+	tmp, err := os.CreateTemp("", "cc-connect-send-file-*.md")
+	if err != nil {
+		t.Fatalf("CreateTemp err: %v", err)
+	}
+	tmpPath := tmp.Name()
+	_ = tmp.Close()
+	defer os.Remove(tmpPath)
+
+	if err := engine.SendFileBySessionKey("feishu:oc_chat:ou_user", tmpPath); err != nil {
+		t.Fatalf("SendFileBySessionKey err: %v", err)
+	}
+
+	platform.mu.Lock()
+	defer platform.mu.Unlock()
+	if len(platform.files) != 1 {
+		t.Fatalf("sent file count mismatch: %d", len(platform.files))
+	}
+	if platform.files[0] != tmpPath {
+		t.Fatalf("sent file path mismatch: got %q want %q", platform.files[0], tmpPath)
+	}
+}
+
+func TestEngineAutoSendMarkdownArtifact_SendsMarkdown(t *testing.T) {
+	platform := &stubPlatform{name: "feishu"}
+	engine := NewEngine("auto-send-markdown-test", &stubAgent{session: newStubAgentSession(make(chan Event))}, []Platform{platform}, "", LangEnglish)
+
+	tmp, err := os.CreateTemp("", "cc-connect-auto-send-*.md")
+	if err != nil {
+		t.Fatalf("CreateTemp err: %v", err)
+	}
+	tmpPath := tmp.Name()
+	_ = tmp.Close()
+	defer os.Remove(tmpPath)
+
+	if err := engine.autoSendMarkdownArtifact("feishu:oc_chat:ou_user", tmpPath); err != nil {
+		t.Fatalf("autoSendMarkdownArtifact err: %v", err)
+	}
+
+	platform.mu.Lock()
+	defer platform.mu.Unlock()
+	if len(platform.files) != 1 {
+		t.Fatalf("sent file count mismatch: %d", len(platform.files))
+	}
+	if platform.files[0] != tmpPath {
+		t.Fatalf("sent file path mismatch: got %q want %q", platform.files[0], tmpPath)
+	}
+}
+
+func TestEngineAutoSendMarkdownArtifact_SkipNonMarkdown(t *testing.T) {
+	platform := &stubPlatform{name: "feishu"}
+	engine := NewEngine("auto-send-skip-test", &stubAgent{session: newStubAgentSession(make(chan Event))}, []Platform{platform}, "", LangEnglish)
+
+	tmp, err := os.CreateTemp("", "cc-connect-auto-send-*.txt")
+	if err != nil {
+		t.Fatalf("CreateTemp err: %v", err)
+	}
+	tmpPath := tmp.Name()
+	_ = tmp.Close()
+	defer os.Remove(tmpPath)
+
+	if err := engine.autoSendMarkdownArtifact("feishu:oc_chat:ou_user", tmpPath); err != nil {
+		t.Fatalf("autoSendMarkdownArtifact err: %v", err)
+	}
+
+	platform.mu.Lock()
+	defer platform.mu.Unlock()
+	if len(platform.files) != 0 {
+		t.Fatalf("expected no file sends, got %d", len(platform.files))
+	}
+}
+
+func TestEngineAutoSendMarkdownArtifact_IgnoreUnsupported(t *testing.T) {
+	platform := &stubPlatformNoFile{name: "feishu"}
+	engine := NewEngine("auto-send-unsupported-test", &stubAgent{session: newStubAgentSession(make(chan Event))}, []Platform{platform}, "", LangEnglish)
+
+	tmp, err := os.CreateTemp("", "cc-connect-auto-send-*.md")
+	if err != nil {
+		t.Fatalf("CreateTemp err: %v", err)
+	}
+	tmpPath := tmp.Name()
+	_ = tmp.Close()
+	defer os.Remove(tmpPath)
+
+	if err := engine.autoSendMarkdownArtifact("feishu:oc_chat:ou_user", tmpPath); err != nil {
+		t.Fatalf("autoSendMarkdownArtifact should ignore unsupported platforms, got: %v", err)
 	}
 }
 
