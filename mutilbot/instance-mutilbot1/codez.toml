@@ -14,13 +14,13 @@ language = "zh"
       name = "rightcode"
       api_key = "sk-ed3199aad41c43bebccc14340ebd7741"
       base_url = "https://right.codes/codex/v1"
-      model = "gpt-5.2"
+      model = "gpt-5.3-codex"
 
     [[projects.agent.providers]]
       name = "codez"
       api_key = ""
       base_url = "https://api.zwenooo.link/v1"
-      model = "gpt-5.2"
+      model = "gpt-5.3-codex"
 
   [[projects.platforms]]
     type = "feishu"
