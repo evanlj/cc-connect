@@ -195,7 +195,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		}
 		// Built-in “squad card” shortcut.
 		if p.shouldShowSquadControlCard(textBody.Text) {
-			if err := p.openSquadControlCardForSession(context.Background(), sessionKey, rctx); err != nil {
+			if err := p.replySquadControlCard(context.Background(), rctx, sessionKey); err != nil {
 				slog.Error("feishu: open squad control card failed", "error", err)
 			}
 			return nil
@@ -373,19 +373,9 @@ func (p *Platform) onCardAction(ctx context.Context, event *larkcb.CardActionTri
 			}
 		case "squad_control_card":
 			sessionKey := fmt.Sprintf("feishu:%s:%s", chatID, userID)
-			cardJSON := buildSquadControlCardJSON(core.SquadLatestRunIDForOwnerSession(sessionKey))
-			var sendErr error
-			// Prefer replying to the clicked card message (works in both group & p2p
-			// even when open_chat_id is absent in callback context).
-			if strings.TrimSpace(messageID) != "" {
-				sendErr = p.replyInteractiveCardByMessageID(ctx, messageID, cardJSON)
-			}
-			// Fallback: send a new message to chat when reply path is unavailable.
-			if sendErr != nil && strings.TrimSpace(chatID) != "" {
-				sendErr = p.sendInteractiveCardToChat(context.Background(), chatID, cardJSON)
-			}
-			if sendErr != nil {
-				slog.Error("feishu: send squad control card failed", "chat_id", chatID, "message_id", messageID, "error", sendErr)
+			rctx := replyContext{messageID: messageID, chatID: chatID}
+			if err := p.replySquadControlCard(ctx, rctx, sessionKey); err != nil {
+				slog.Error("feishu: send squad control card failed", "chat_id", chatID, "message_id", messageID, "error", err)
 				toast = "打开 Squad 控制卡失败（请确认群权限/事件配置）"
 			} else {
 				toast = "已打开 Squad 控制卡"
@@ -529,7 +519,7 @@ func (p *Platform) replyMenuCard(ctx context.Context, rc replyContext) error {
 	return nil
 }
 
-func (p *Platform) openSquadControlCardForSession(ctx context.Context, sessionKey string, rc replyContext) error {
+func (p *Platform) replySquadControlCard(ctx context.Context, rc replyContext, sessionKey string) error {
 	sessionKey = strings.TrimSpace(sessionKey)
 	if sessionKey == "" {
 		return fmt.Errorf("feishu: sessionKey is empty, cannot open squad card")
@@ -818,7 +808,7 @@ func buildMenuCardJSON() string {
 		"header": map[string]any{
 			"title": map[string]any{
 				"tag":     "plain_text",
-				"content": "快捷菜单（业务 + 多Bot讨论）",
+				"content": "快捷菜单",
 			},
 			"template": "blue",
 		},
@@ -826,9 +816,8 @@ func buildMenuCardJSON() string {
 			map[string]any{
 				"tag": "div",
 				"text": map[string]any{
-					"tag": "lark_md",
-					"content": "忘记关键字时可直接用这个菜单。\n\n" +
-						"请选择一个方向：",
+					"tag":     "lark_md",
+					"content": "请选择操作：",
 				},
 			},
 			map[string]any{
@@ -879,7 +868,7 @@ func buildMenuCardJSON() string {
 				"tag": "div",
 				"text": map[string]any{
 					"tag":     "lark_md",
-					"content": "**多Bot讨论快捷操作**",
+					"content": "**多Bot讨论**",
 				},
 			},
 			map[string]any{
@@ -982,7 +971,7 @@ func buildMenuCardJSON() string {
 				"tag": "div",
 				"text": map[string]any{
 					"tag":     "lark_md",
-					"content": "也可以直接发一句话描述需求（比如：`查 workspace_id=66052431 未完成需求`）。",
+					"content": "快捷口令：`菜单`、`/squad-card`",
 				},
 			},
 		},
@@ -1174,11 +1163,7 @@ func buildSquadControlCardJSON(defaultRunID string) string {
 			"columns":            cols,
 		}
 	}
-
-	intro := "**Squad 审核（JSON 2.0 表单）**\n\n" +
-		"在下方填写 **Run ID** 后，点击按钮将**整表提交**（飞书要求带输入的卡片使用表单提交）。\n" +
-		"Run ID 已按你在本实例下**最近一次更新的 Squad 运行**自动预填；可改。\n" +
-		"裁决返工前请在第二栏填写原因与修改方案。"
+	tips := "/squad start --repo G:/AgeAction/AgeActionExample --planner-timeout-sec 3600 实现一个新的Action结点，当前项目没有的功能"
 
 	formElements := []any{
 		map[string]any{
@@ -1186,12 +1171,25 @@ func buildSquadControlCardJSON(defaultRunID string) string {
 			"element_id":    "el_sq_run",
 			"name":          "run_id",
 			"width":         "fill",
-			"label":         map[string]any{"tag": "plain_text", "content": "Run ID"},
 			"placeholder":   map[string]any{"tag": "plain_text", "content": "squad_20260321_xxx"},
 			"default_value": defaultRunID,
 			"required":      false,
-			"max_length":    400,
 		},
+		squadV2Row(
+			squadV2Col("auto", squadV2SubmitBtn("sq_btn_info", "default", "统计", map[string]any{"cc_action": "squad_cmd", "cmd": "list"})),
+			squadV2Col("auto", squadV2SubmitBtn("sq_btn_stat", "default", "状态", map[string]any{"cc_action": "squad_cmd", "cmd": "status"})),
+			squadV2Col("auto", squadV2SubmitBtn("sq_btn_plan", "default", "计划", map[string]any{"cc_action": "squad_cmd", "cmd": "show_plan"})),
+			squadV2Col("auto", squadV2SubmitBtn("sq_btn_aplan", "default", "批准", map[string]any{"cc_action": "squad_cmd", "cmd": "approve_plan"})),
+		),
+		squadV2Row(
+			squadV2Col("auto", squadV2SubmitBtn("sq_btn_task", "default", "任务", map[string]any{"cc_action": "squad_cmd", "cmd": "show_task"})),
+			squadV2Col("auto", squadV2SubmitBtn("sq_btn_atask", "default", "批准任务", map[string]any{"cc_action": "squad_cmd", "cmd": "approve_task"})),
+			squadV2Col("auto", squadV2SubmitBtn("sq_btn_skip", "default", "跳过任务", map[string]any{"cc_action": "squad_cmd", "cmd": "skip_task"})),
+		),
+		squadV2Row(
+			squadV2Col("auto", squadV2SubmitBtn("sq_btn_jpass", "default", "任务通过", map[string]any{"cc_action": "squad_cmd", "cmd": "judge_pass"})),
+			squadV2Col("auto", squadV2SubmitBtn("sq_btn_jrework", "default", "任务重做", map[string]any{"cc_action": "squad_cmd", "cmd": "judge_rework"})),
+		),
 		map[string]any{
 			"tag":           "input",
 			"element_id":    "el_sq_note",
@@ -1199,48 +1197,17 @@ func buildSquadControlCardJSON(defaultRunID string) string {
 			"input_type":    "multiline_text",
 			"rows":          3,
 			"width":         "fill",
-			"label":         map[string]any{"tag": "plain_text", "content": "返工或跳过说明"},
-			"placeholder":   map[string]any{"tag": "plain_text", "content": "问题与修改方案，或跳过理由"},
+			"placeholder":   map[string]any{"tag": "plain_text", "content": "不通过原因与修改方案"},
 			"default_value": "",
 			"required":      false,
-			"max_length":    1000,
-		},
-		squadV2Row(
-			squadV2Col("auto", squadV2SubmitBtn("sq_btn_list", "default", "运行列表", map[string]any{"cc_action": "squad_cmd", "cmd": "list"})),
-			squadV2Col("auto", squadV2SubmitBtn("sq_btn_stat", "default", "状态", map[string]any{"cc_action": "squad_cmd", "cmd": "status"})),
-			squadV2Col("auto", squadV2SubmitBtn("sq_btn_plan", "default", "查看计划", map[string]any{"cc_action": "squad_cmd", "cmd": "show_plan"})),
-			squadV2Col("auto", squadV2SubmitBtn("sq_btn_task", "default", "查看任务", map[string]any{"cc_action": "squad_cmd", "cmd": "show_task"})),
-		),
-		squadV2Row(
-			squadV2Col("auto", squadV2SubmitBtn("sq_btn_aplan", "primary", "批准计划", map[string]any{"cc_action": "squad_cmd", "cmd": "approve_plan"})),
-			squadV2Col("auto", squadV2SubmitBtn("sq_btn_atask", "primary", "批准任务", map[string]any{"cc_action": "squad_cmd", "cmd": "approve_task"})),
-			squadV2Col("auto", squadV2SubmitBtn("sq_btn_skip", "default", "跳过任务", map[string]any{"cc_action": "squad_cmd", "cmd": "skip_task"})),
-		),
-		squadV2Row(
-			squadV2Col("auto", squadV2SubmitBtn("sq_btn_jpass", "primary", "裁决通过", map[string]any{"cc_action": "squad_cmd", "cmd": "judge_pass"})),
-			squadV2Col("auto", squadV2SubmitBtn("sq_btn_jrework", "danger", "裁决返工", map[string]any{"cc_action": "squad_cmd", "cmd": "judge_rework"})),
-		),
-		map[string]any{
-			"tag":        "hr",
-			"element_id": "sq_div_1",
-			"margin":     "8px 0",
 		},
 		map[string]any{
 			"tag":        "markdown",
-			"element_id": "sq_tpl_hint",
-			"content":    "**一键模板**（提交时带入当前 Run ID；未填则用 RUN_ID 占位）",
+			"element_id": "sq_tips",
+			"content":    tips,
 			"text_align": "left",
 			"text_size":  "normal",
 		},
-		squadV2Row(
-			squadV2Col("auto", squadV2SubmitBtn("sq_tpl_start", "default", "启动模板", map[string]any{"cc_action": "squad_tpl", "tpl": "start"})),
-			squadV2Col("auto", squadV2SubmitBtn("sq_tpl_aplan", "default", "计划确认", map[string]any{"cc_action": "squad_tpl", "tpl": "approve_plan"})),
-			squadV2Col("auto", squadV2SubmitBtn("sq_tpl_atask", "default", "任务确认", map[string]any{"cc_action": "squad_tpl", "tpl": "approve_task"})),
-		),
-		squadV2Row(
-			squadV2Col("auto", squadV2SubmitBtn("sq_tpl_skip", "default", "跳过模板", map[string]any{"cc_action": "squad_tpl", "tpl": "skip_task"})),
-			squadV2Col("auto", squadV2SubmitBtn("sq_tpl_jrw", "default", "返工模板", map[string]any{"cc_action": "squad_tpl", "tpl": "judge_rework"})),
-		),
 	}
 
 	card := map[string]any{
@@ -1258,13 +1225,6 @@ func buildSquadControlCardJSON(defaultRunID string) string {
 		},
 		"body": map[string]any{
 			"elements": []any{
-				map[string]any{
-					"tag":        "markdown",
-					"element_id": "sq_intro",
-					"content":    intro,
-					"text_align": "left",
-					"text_size":  "normal",
-				},
 				map[string]any{
 					"tag":        "form",
 					"element_id": "sq_form",

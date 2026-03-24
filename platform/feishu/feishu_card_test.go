@@ -21,6 +21,32 @@ func TestBuildDebateControlCardJSON_CompatibleText(t *testing.T) {
 	}
 }
 
+func TestBuildMenuCardJSON_LeanCopy(t *testing.T) {
+	cardJSON := buildMenuCardJSON()
+	if !json.Valid([]byte(cardJSON)) {
+		t.Fatalf("menu card is not valid json: %s", cardJSON)
+	}
+	mustContain := []string{
+		"请选择操作：",
+		"**多Bot讨论**",
+		"快捷口令：`菜单`、`/squad-card`",
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(cardJSON, s) {
+			t.Fatalf("menu card should contain %q, got: %s", s, cardJSON)
+		}
+	}
+	mustNotContain := []string{
+		"忘记关键字时可直接用这个菜单",
+		"**多Bot讨论快捷操作**",
+	}
+	for _, s := range mustNotContain {
+		if strings.Contains(cardJSON, s) {
+			t.Fatalf("menu card should not contain %q, got: %s", s, cardJSON)
+		}
+	}
+}
+
 func TestBuildSquadControlCardJSON_CompatibleText(t *testing.T) {
 	cardJSON := buildSquadControlCardJSON("")
 	if !json.Valid([]byte(cardJSON)) {
@@ -49,6 +75,50 @@ func TestBuildSquadControlCardJSON_DefaultRunID(t *testing.T) {
 	cardJSON := buildSquadControlCardJSON("squad_20260322_000001_000042")
 	if !strings.Contains(cardJSON, "squad_20260322_000001_000042") {
 		t.Fatalf("default run id not embedded: %s", cardJSON)
+	}
+}
+
+func TestBuildSquadControlCardJSON_LeanLayout(t *testing.T) {
+	cardJSON := buildSquadControlCardJSON("")
+	mustContain := []string{
+		"统计",
+		"状态",
+		"计划",
+		"批准",
+		"任务",
+		"批准任务",
+		"跳过任务",
+		"任务通过",
+		"任务重做",
+		"不通过原因与修改方案",
+		"/squad start --repo G:/AgeAction/AgeActionExample --planner-timeout-sec 3600 实现一个新的Action结点，当前项目没有的功能",
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(cardJSON, s) {
+			t.Fatalf("squad card should contain %q, got: %s", s, cardJSON)
+		}
+	}
+	mustNotContain := []string{
+		"运行列表",
+		"查看计划",
+		"查看任务",
+		"批准计划",
+		"裁决通过",
+		"裁决返工",
+		"返工或跳过说明",
+		"问题与修改方案，或跳过理由",
+		"一键模板",
+		"启动模板",
+		"计划确认",
+		"任务确认",
+		"跳过模板",
+		"返工模板",
+		"max_length",
+	}
+	for _, s := range mustNotContain {
+		if strings.Contains(cardJSON, s) {
+			t.Fatalf("squad card should not contain %q, got: %s", s, cardJSON)
+		}
 	}
 }
 
