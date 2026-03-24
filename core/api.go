@@ -289,32 +289,55 @@ func (s *APIServer) handleAsk(w http.ResponseWriter, r *http.Request) {
 		"content":     result.Content,
 		"latency_ms":  result.LatencyMS,
 		"tool_count":  result.ToolCount,
+		"timeline":    result.Timeline,
 	})
 }
 
 func (s *APIServer) handleSessions(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	type sessionInfo struct {
 		Project    string `json:"project"`
 		SessionKey string `json:"session_key"`
 		Platform   string `json:"platform"`
 	}
 
+	type projectEngine struct {
+		project string
+		engine  *Engine
+	}
+
+	projectFilter := strings.TrimSpace(r.URL.Query().Get("project"))
+	targets := make([]projectEngine, 0, 1)
+
+	s.mu.RLock()
+	if projectFilter != "" {
+		engine, ok := s.engines[projectFilter]
+		if !ok {
+			s.mu.RUnlock()
+			http.Error(w, fmt.Sprintf("project %q not found", projectFilter), http.StatusNotFound)
+			return
+		}
+		targets = append(targets, projectEngine{project: projectFilter, engine: engine})
+	} else {
+		targets = make([]projectEngine, 0, len(s.engines))
+		for name, engine := range s.engines {
+			targets = append(targets, projectEngine{project: name, engine: engine})
+		}
+	}
+	s.mu.RUnlock()
+
 	var result []sessionInfo
-	for name, e := range s.engines {
-		e.interactiveMu.Lock()
-		for key, state := range e.interactiveStates {
+	for _, target := range targets {
+		target.engine.interactiveMu.Lock()
+		for key, state := range target.engine.interactiveStates {
 			if state.platform != nil {
 				result = append(result, sessionInfo{
-					Project:    name,
+					Project:    target.project,
 					SessionKey: key,
 					Platform:   state.platform.Name(),
 				})
 			}
 		}
-		e.interactiveMu.Unlock()
+		target.engine.interactiveMu.Unlock()
 	}
 
 	w.Header().Set("Content-Type", "application/json")

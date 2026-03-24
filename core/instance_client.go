@@ -62,10 +62,11 @@ func (c *LocalInstanceClient) Ask(ctx context.Context, socketPath string, req As
 	}
 
 	var raw struct {
-		Status    string `json:"status"`
-		Content   string `json:"content"`
-		LatencyMS int64  `json:"latency_ms"`
-		ToolCount int    `json:"tool_count"`
+		Status    string             `json:"status"`
+		Content   string             `json:"content"`
+		LatencyMS int64              `json:"latency_ms"`
+		ToolCount int                `json:"tool_count"`
+		Timeline  []AskTimelineEvent `json:"timeline"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return out, fmt.Errorf("decode ask response: %w", err)
@@ -74,6 +75,7 @@ func (c *LocalInstanceClient) Ask(ctx context.Context, socketPath string, req As
 	out.Content = raw.Content
 	out.LatencyMS = raw.LatencyMS
 	out.ToolCount = raw.ToolCount
+	out.Timeline = raw.Timeline
 	return out, nil
 }
 

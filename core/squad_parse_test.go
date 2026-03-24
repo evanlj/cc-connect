@@ -126,6 +126,27 @@ func TestParseSquadPlan_JSON(t *testing.T) {
 	}
 }
 
+func TestParseSquadPlan_ThoughtSummaryPlusJSON(t *testing.T) {
+	reply := "" +
+		"A) 思路摘要\n" +
+		"- 先按功能边界拆任务\n" +
+		"- 先改接口，再补测试与文档\n\n" +
+		"B) JSON结果\n" +
+		"```json\n" +
+		"{\"title\":\"支付重构计划\",\"overview\":\"按模块分层推进\",\"tasks\":[{\"id\":\"task-1\",\"title\":\"拆分网关接口\",\"objective\":\"降低耦合\",\"acceptance\":\"网关接口可单测\"}]}\n" +
+		"```"
+	plan, err := parseSquadPlan(reply)
+	if err != nil {
+		t.Fatalf("parseSquadPlan failed: %v", err)
+	}
+	if plan.Title != "支付重构计划" {
+		t.Fatalf("title mismatch: %s", plan.Title)
+	}
+	if len(plan.Tasks) != 1 || plan.Tasks[0].ID != "task-1" {
+		t.Fatalf("tasks mismatch: %+v", plan.Tasks)
+	}
+}
+
 func TestParseSquadPlan_Fallback(t *testing.T) {
 	plan, err := parseSquadPlan("这是一个非 JSON 回复")
 	if err != nil {
@@ -174,6 +195,27 @@ func TestParseReviewerFindings_JSON(t *testing.T) {
 	}
 }
 
+func TestParseReviewerFindings_ThoughtSummaryPlusJSON(t *testing.T) {
+	reply := "" +
+		"A) 思路摘要\n" +
+		"- 仅基于 task-2 验收点与变更文件审核\n" +
+		"- 发现一个阻塞项\n\n" +
+		"B) JSON结果\n" +
+		"```json\n" +
+		"{\"review_result\":\"存在阻塞问题\",\"failed_reasons\":[\"[ACC:补充文档] [FILE:Doc/任务说明.md] 缺少回归证据\"],\"suggestions\":[\"补充执行日志与命令\"]}\n" +
+		"```"
+	result, reasons, suggestions := parseReviewerFindings(reply)
+	if !strings.Contains(result, "阻塞") {
+		t.Fatalf("unexpected review_result: %s", result)
+	}
+	if len(reasons) != 1 || !strings.Contains(reasons[0], "[FILE:Doc/任务说明.md]") {
+		t.Fatalf("unexpected failed reasons: %+v", reasons)
+	}
+	if len(suggestions) != 1 || suggestions[0] != "补充执行日志与命令" {
+		t.Fatalf("unexpected suggestions: %+v", suggestions)
+	}
+}
+
 func TestParseReviewerFindings_LegacyVerdictJSON(t *testing.T) {
 	reply := "{\"verdict\":\"REWORK\",\"blockers\":[\"测试命令缺失\"],\"suggestions\":[\"补充可复现命令\"]}"
 	result, reasons, suggestions := parseReviewerFindings(reply)
@@ -195,6 +237,24 @@ func TestParseReviewerFindings_TextFallback(t *testing.T) {
 	}
 	if len(reasons) == 0 {
 		t.Fatalf("text fallback should provide at least one failed reason when text implies rework")
+	}
+}
+
+func TestParseExecutorMeta_ThoughtSummaryPlusJSON(t *testing.T) {
+	reply := "" +
+		"A) 思路摘要\n" +
+		"- 本轮先补齐核心实现\n" +
+		"- 再补充测试并执行\n\n" +
+		"B) JSON结果\n" +
+		"```json\n" +
+		"{\"changed_files\":[\"core/engine.go\",\"Doc/执行说明.md\"],\"test_result\":\"go test ./core 通过\"}\n" +
+		"```"
+	changed, testResult := parseExecutorMeta(reply)
+	if len(changed) != 2 || changed[0] != "core/engine.go" || changed[1] != "Doc/执行说明.md" {
+		t.Fatalf("unexpected changed files: %+v", changed)
+	}
+	if testResult != "go test ./core 通过" {
+		t.Fatalf("unexpected test result: %s", testResult)
 	}
 }
 

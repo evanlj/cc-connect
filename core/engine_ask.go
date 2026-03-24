@@ -10,16 +10,27 @@ import (
 )
 
 type AskResult struct {
-	Content   string `json:"content"`
-	LatencyMS int64  `json:"latency_ms"`
-	ToolCount int    `json:"tool_count,omitempty"`
+	Content   string             `json:"content"`
+	LatencyMS int64              `json:"latency_ms"`
+	ToolCount int                `json:"tool_count,omitempty"`
+	Timeline  []AskTimelineEvent `json:"timeline"`
+}
+
+type AskTimelineEvent struct {
+	Type      string `json:"type"`
+	AtMS      int64  `json:"at_ms"`
+	Content   string `json:"content,omitempty"`
+	ToolName  string `json:"tool_name,omitempty"`
+	ToolInput string `json:"tool_input,omitempty"`
 }
 
 // AskSession sends a prompt to an existing session and waits for the final
 // model response. It is intended for orchestration/API use cases where callers
 // need a synchronous result instead of streaming platform messages.
 func (e *Engine) AskSession(sessionKey, prompt string, timeout time.Duration) (AskResult, error) {
-	var out AskResult
+	out := AskResult{
+		Timeline: make([]AskTimelineEvent, 0, 8),
+	}
 	sessionKey = strings.TrimSpace(sessionKey)
 	prompt = strings.TrimSpace(prompt)
 	if sessionKey == "" {
@@ -64,9 +75,14 @@ func (e *Engine) AskSession(sessionKey, prompt string, timeout time.Duration) (A
 	var (
 		textParts []string
 		toolCount int
+		hasText   bool
 	)
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
+	appendTimeline := func(evt AskTimelineEvent) {
+		evt.AtMS = time.Since(startedAt).Milliseconds()
+		out.Timeline = append(out.Timeline, evt)
+	}
 
 	for {
 		select {
@@ -90,9 +106,22 @@ func (e *Engine) AskSession(sessionKey, prompt string, timeout time.Duration) (A
 			}
 
 			switch event.Type {
+			case EventThinking:
+				if strings.TrimSpace(event.Content) != "" {
+					appendTimeline(AskTimelineEvent{
+						Type:    "thinking",
+						Content: event.Content,
+					})
+				}
+
 			case EventText:
 				if event.Content != "" {
 					textParts = append(textParts, event.Content)
+					hasText = true
+					appendTimeline(AskTimelineEvent{
+						Type:    "text",
+						Content: event.Content,
+					})
 				}
 				if event.SessionID != "" && session.AgentSessionID == "" {
 					session.AgentSessionID = event.SessionID
@@ -101,6 +130,11 @@ func (e *Engine) AskSession(sessionKey, prompt string, timeout time.Duration) (A
 
 			case EventToolUse:
 				toolCount++
+				appendTimeline(AskTimelineEvent{
+					Type:      "tool",
+					ToolName:  event.ToolName,
+					ToolInput: event.ToolInput,
+				})
 
 			case EventPermissionRequest:
 				// /ask is a synchronous API and cannot wait for human approval.
@@ -115,12 +149,25 @@ func (e *Engine) AskSession(sessionKey, prompt string, timeout time.Duration) (A
 					session.AgentSessionID = event.SessionID
 				}
 
+				streamedText := ""
+				if len(textParts) > 0 {
+					streamedText = strings.Join(textParts, "")
+				}
+
 				full := event.Content
-				if full == "" && len(textParts) > 0 {
-					full = strings.Join(textParts, "")
+				if full == "" && streamedText != "" {
+					full = streamedText
 				}
 				if full == "" {
 					full = e.i18n.T(MsgEmptyResponse)
+				}
+				shouldAppendFinalText := strings.TrimSpace(full) != "" &&
+					(!hasText || (event.Content != "" && event.Content != streamedText))
+				if shouldAppendFinalText {
+					appendTimeline(AskTimelineEvent{
+						Type:    "text",
+						Content: full,
+					})
 				}
 
 				session.AddHistory("assistant", full)

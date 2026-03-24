@@ -193,6 +193,13 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 			}
 			return nil
 		}
+		// Built-in “squad card” shortcut.
+		if p.shouldShowSquadControlCard(textBody.Text) {
+			if err := p.openSquadControlCardForSession(context.Background(), sessionKey, rctx); err != nil {
+				slog.Error("feishu: open squad control card failed", "error", err)
+			}
+			return nil
+		}
 
 		p.handler(p, &core.Message{
 			SessionKey: sessionKey, Platform: "feishu",
@@ -458,6 +465,20 @@ func (p *Platform) shouldShowMenuCard(text string) bool {
 	}
 }
 
+func (p *Platform) shouldShowSquadControlCard(text string) bool {
+	t := normalizeMenuTriggerText(text)
+	if t == "" {
+		return false
+	}
+	t = strings.Trim(t, "？?!.。")
+	switch strings.ToLower(t) {
+	case "/squad-card", "/squad_card", "squad卡片", "squad 控制卡", "squad控制卡", "squad 审核控制卡":
+		return true
+	default:
+		return false
+	}
+}
+
 func normalizeMenuTriggerText(raw string) string {
 	s := strings.TrimSpace(raw)
 	if s == "" {
@@ -506,6 +527,30 @@ func (p *Platform) replyMenuCard(ctx context.Context, rc replyContext) error {
 		return fmt.Errorf("feishu: reply menu card failed code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	return nil
+}
+
+func (p *Platform) openSquadControlCardForSession(ctx context.Context, sessionKey string, rc replyContext) error {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return fmt.Errorf("feishu: sessionKey is empty, cannot open squad card")
+	}
+	cardJSON := buildSquadControlCardJSON(core.SquadLatestRunIDForOwnerSession(sessionKey))
+
+	if strings.TrimSpace(rc.messageID) != "" {
+		if err := p.replyInteractiveCardByMessageID(ctx, rc.messageID, cardJSON); err == nil {
+			return nil
+		}
+		// Fallback to send a new message in chat when reply fails.
+		if strings.TrimSpace(rc.chatID) != "" {
+			if err := p.sendInteractiveCardToChat(ctx, rc.chatID, cardJSON); err == nil {
+				return nil
+			}
+		}
+	}
+	if strings.TrimSpace(rc.chatID) != "" {
+		return p.sendInteractiveCardToChat(ctx, rc.chatID, cardJSON)
+	}
+	return fmt.Errorf("feishu: chatID/messageID are both empty, cannot open squad card")
 }
 
 // Send sends a new message to the same chat (not a reply to original message)

@@ -144,6 +144,55 @@ func TestEngineAskSessionSuccess(t *testing.T) {
 	if res.LatencyMS < 0 {
 		t.Fatalf("latency should be >= 0, got %d", res.LatencyMS)
 	}
+	if len(res.Timeline) != 2 {
+		t.Fatalf("timeline length mismatch: %d", len(res.Timeline))
+	}
+	if res.Timeline[0].Type != "text" || res.Timeline[0].Content != "partial " {
+		t.Fatalf("unexpected timeline[0]: %+v", res.Timeline[0])
+	}
+	if res.Timeline[1].Type != "text" || res.Timeline[1].Content != "final answer" {
+		t.Fatalf("unexpected timeline[1]: %+v", res.Timeline[1])
+	}
+	if res.Timeline[1].AtMS < res.Timeline[0].AtMS {
+		t.Fatalf("timeline order invalid: %+v", res.Timeline)
+	}
+}
+
+func TestEngineAskSessionTimelineThinkingToolTextOrder(t *testing.T) {
+	events := make(chan Event, 8)
+	events <- Event{Type: EventThinking, Content: "analyzing"}
+	events <- Event{Type: EventToolUse, ToolName: "read_file", ToolInput: "core/engine_ask.go"}
+	events <- Event{Type: EventText, Content: "streamed answer"}
+	events <- Event{Type: EventResult, Content: ""}
+	session := newStubAgentSession(events)
+	agent := &stubAgent{session: session}
+
+	engine := NewEngine("ask-test", agent, nil, "", LangEnglish)
+	res, err := engine.AskSession("feishu:oc_chat:ou_user", "inspect timeline", 5*time.Second)
+	if err != nil {
+		t.Fatalf("AskSession unexpected err: %v", err)
+	}
+	if res.Content != "streamed answer" {
+		t.Fatalf("content mismatch: got %q", res.Content)
+	}
+	if res.ToolCount != 1 {
+		t.Fatalf("tool count mismatch: %d", res.ToolCount)
+	}
+	if len(res.Timeline) != 3 {
+		t.Fatalf("timeline length mismatch: %d", len(res.Timeline))
+	}
+	if res.Timeline[0].Type != "thinking" || res.Timeline[0].Content != "analyzing" {
+		t.Fatalf("unexpected timeline[0]: %+v", res.Timeline[0])
+	}
+	if res.Timeline[1].Type != "tool" || res.Timeline[1].ToolName != "read_file" {
+		t.Fatalf("unexpected timeline[1]: %+v", res.Timeline[1])
+	}
+	if res.Timeline[2].Type != "text" || res.Timeline[2].Content != "streamed answer" {
+		t.Fatalf("unexpected timeline[2]: %+v", res.Timeline[2])
+	}
+	if res.Timeline[0].AtMS > res.Timeline[1].AtMS || res.Timeline[1].AtMS > res.Timeline[2].AtMS {
+		t.Fatalf("timeline AtMS should be non-decreasing: %+v", res.Timeline)
+	}
 }
 
 func TestEngineAskSessionPermissionAutoDeny(t *testing.T) {

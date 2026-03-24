@@ -99,3 +99,23 @@ func TestBuildSquadCommandByAction_SkipTask(t *testing.T) {
 		t.Fatalf("toast should not be empty")
 	}
 }
+
+func TestShouldShowSquadControlCard(t *testing.T) {
+	p := &Platform{}
+	cases := []struct {
+		text string
+		want bool
+	}{
+		{text: "/squad-card", want: true},
+		{text: "  /squad_card  ", want: true},
+		{text: "squad控制卡", want: true},
+		{text: "<at id=all></at> /squad-card", want: true},
+		{text: "菜单", want: false},
+		{text: "请帮我看下squad", want: false},
+	}
+	for _, tc := range cases {
+		if got := p.shouldShowSquadControlCard(tc.text); got != tc.want {
+			t.Fatalf("shouldShowSquadControlCard(%q)=%v, want %v", tc.text, got, tc.want)
+		}
+	}
+}

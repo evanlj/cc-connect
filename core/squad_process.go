@@ -316,21 +316,7 @@ func buildRoleRuntimeConfig(templatePath, outPath, dataDir, repoPath, provider, 
 		agentOptions["provider"] = provider
 	}
 
-	platforms := make([]cfgpkg.PlatformConfig, 0, len(baseProject.Platforms))
-	for _, pf := range baseProject.Platforms {
-		platforms = append(platforms, cfgpkg.PlatformConfig{
-			Type:    pf.Type,
-			Options: cloneMapAny(pf.Options),
-		})
-	}
-	// Prevent runtime worker processes from handling normal inbound chat messages.
-	for i := range platforms {
-		if platforms[i].Options == nil {
-			platforms[i].Options = make(map[string]any)
-		}
-		platforms[i].Options["allow_from"] = "__squad_internal_only__"
-		platforms[i].Options["reaction_emoji"] = "none"
-	}
+	platforms := buildSquadRuntimePlatforms(baseProject.Platforms)
 
 	outCfg := cfgpkg.Config{
 		DataDir:  filepath.ToSlash(dataDir),
@@ -363,6 +349,39 @@ func buildRoleRuntimeConfig(templatePath, outPath, dataDir, repoPath, provider, 
 		return fmt.Errorf("encode runtime config: %w", err)
 	}
 	return nil
+}
+
+func tuneSquadRuntimePlatform(in cfgpkg.PlatformConfig) cfgpkg.PlatformConfig {
+	out := cfgpkg.PlatformConfig{
+		Type:    in.Type,
+		Options: cloneMapAny(in.Options),
+	}
+	if out.Options == nil {
+		out.Options = make(map[string]any)
+	}
+	// Prevent runtime worker processes from handling normal inbound chat messages.
+	out.Options["allow_from"] = "__squad_internal_only__"
+	out.Options["reaction_emoji"] = "none"
+	return out
+}
+
+func buildSquadRuntimePlatforms(in []cfgpkg.PlatformConfig) []cfgpkg.PlatformConfig {
+	out := make([]cfgpkg.PlatformConfig, 0, len(in))
+	for _, pf := range in {
+		// Squad worker processes are controlled by local api.sock only.
+		// Skip Feishu so worker instances won't open extra websocket connections.
+		if strings.EqualFold(strings.TrimSpace(pf.Type), "feishu") {
+			continue
+		}
+		out = append(out, tuneSquadRuntimePlatform(pf))
+	}
+	if len(out) > 0 {
+		return out
+	}
+	// Keep config valid even when template only defines Feishu.
+	return []cfgpkg.PlatformConfig{
+		tuneSquadRuntimePlatform(cfgpkg.PlatformConfig{Type: "noop", Options: map[string]any{}}),
+	}
 }
 
 func cloneMapAny(in map[string]any) map[string]any {
