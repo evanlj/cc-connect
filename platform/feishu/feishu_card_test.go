@@ -85,6 +85,7 @@ func TestBuildSquadControlCardJSON_LeanLayout(t *testing.T) {
 		"状态",
 		"计划",
 		"批准",
+		"计划重做",
 		"任务",
 		"批准任务",
 		"跳过任务",
@@ -119,6 +120,26 @@ func TestBuildSquadControlCardJSON_LeanLayout(t *testing.T) {
 		if strings.Contains(cardJSON, s) {
 			t.Fatalf("squad card should not contain %q, got: %s", s, cardJSON)
 		}
+	}
+}
+
+func TestBuildSquadCommandByAction_Replan(t *testing.T) {
+	cmd, toast := buildSquadCommandByAction("replan", "squad_3", "旧计划拆分不合理，按模块边界重做")
+	if !strings.Contains(cmd, "/squad replan squad_3") {
+		t.Fatalf("unexpected replan command: %s", cmd)
+	}
+	if strings.TrimSpace(toast) == "" {
+		t.Fatalf("toast should not be empty")
+	}
+}
+
+func TestBuildSquadCommandByAction_ReplanRequireNote(t *testing.T) {
+	cmd, toast := buildSquadCommandByAction("replan", "squad_3", "")
+	if !strings.Contains(cmd, "请先填写不通过原因与重做方向") {
+		t.Fatalf("should return guidance when replan note is missing, got: %s", cmd)
+	}
+	if !strings.Contains(toast, "重做计划信息为空") {
+		t.Fatalf("unexpected toast: %s", toast)
 	}
 }
 

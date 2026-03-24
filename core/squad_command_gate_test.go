@@ -156,6 +156,175 @@ func TestCmdSquadApprovePlanThenApproveTask(t *testing.T) {
 	}
 }
 
+func TestCmdSquadReplan_Success(t *testing.T) {
+	platform := &stubPlatform{name: "feishu"}
+	engine := NewEngine(
+		"squad-cmd-test",
+		&stubAgent{session: newStubAgentSession(make(chan Event))},
+		[]Platform{platform},
+		filepath.Join(t.TempDir(), "sessions", "sessions.json"),
+		LangChinese,
+	)
+	t.Cleanup(func() { _ = engine.Stop() })
+
+	run := &SquadRun{
+		RunID:           "squad_test_replan_ok",
+		Status:          SquadStatusWaiting,
+		Phase:           SquadPhaseWaitPlanApprove,
+		OwnerSessionKey: "feishu:chat:user",
+		RepoPath:        `G:\demo\repo`,
+		TaskPrompt:      "示例需求",
+		PlannerRole:     "jarvis",
+		ExecutorRole:    "xingzou",
+		ReviewerRole:    "jianzhu",
+		PlanApproved:    false,
+		CurrentTask:     1,
+		CurrentRound:    2,
+		Plan: SquadPlan{
+			Title: "旧计划",
+			Tasks: []SquadTask{{ID: "task-1", Title: "旧任务"}},
+		},
+		RoleRuntime: map[string]SquadRoleRuntime{},
+	}
+	if err := engine.squadStore.SaveRun(run); err != nil {
+		t.Fatalf("save run failed: %v", err)
+	}
+
+	// Force "already running" branch to avoid starting real subprocess in test.
+	engine.squadMu.Lock()
+	engine.squadRuns[run.RunID] = func() {}
+	engine.squadMu.Unlock()
+
+	msg := &Message{
+		SessionKey: "feishu:chat:user",
+		Platform:   "feishu",
+		UserID:     "user",
+		UserName:   "u",
+		ReplyCtx:   "ctx",
+	}
+	note := "旧计划任务拆分不合理，请按模块边界重拆，并补测试命令"
+	engine.cmdSquadReplan(platform, msg, []string{run.RunID, note})
+
+	updated, err := engine.squadStore.GetRun(run.RunID)
+	if err != nil {
+		t.Fatalf("load run after replan failed: %v", err)
+	}
+	if updated.Phase != SquadPhasePlanning || updated.Status != SquadStatusRunning {
+		t.Fatalf("run should move to planning/running, got status=%s phase=%s", updated.Status, updated.Phase)
+	}
+	if strings.TrimSpace(updated.PlanReworkNote) == "" || !strings.Contains(updated.PlanReworkNote, "模块边界") {
+		t.Fatalf("plan rework note should be saved, got=%q", updated.PlanReworkNote)
+	}
+	if len(updated.Plan.Tasks) != 0 || strings.TrimSpace(updated.Plan.Title) != "" {
+		t.Fatalf("plan should be reset before replan, got=%+v", updated.Plan)
+	}
+	reply := lastPlatformReply(platform)
+	if !strings.Contains(reply, "已发起计划重做") {
+		t.Fatalf("unexpected reply: %s", reply)
+	}
+}
+
+func TestCmdSquadReplan_RejectWhenPlanApproved(t *testing.T) {
+	platform := &stubPlatform{name: "feishu"}
+	engine := NewEngine(
+		"squad-cmd-test",
+		&stubAgent{session: newStubAgentSession(make(chan Event))},
+		[]Platform{platform},
+		filepath.Join(t.TempDir(), "sessions", "sessions.json"),
+		LangChinese,
+	)
+	t.Cleanup(func() { _ = engine.Stop() })
+
+	run := &SquadRun{
+		RunID:           "squad_test_replan_reject",
+		Status:          SquadStatusRunning,
+		Phase:           SquadPhaseWaitTaskApprove,
+		OwnerSessionKey: "feishu:chat:user",
+		RepoPath:        `G:\demo\repo`,
+		TaskPrompt:      "示例需求",
+		PlannerRole:     "jarvis",
+		ExecutorRole:    "xingzou",
+		ReviewerRole:    "jianzhu",
+		PlanApproved:    true,
+		Plan: SquadPlan{
+			Title: "已通过计划",
+			Tasks: []SquadTask{{ID: "task-1", Title: "任务1"}},
+		},
+		RoleRuntime: map[string]SquadRoleRuntime{},
+	}
+	if err := engine.squadStore.SaveRun(run); err != nil {
+		t.Fatalf("save run failed: %v", err)
+	}
+
+	msg := &Message{
+		SessionKey: "feishu:chat:user",
+		Platform:   "feishu",
+		UserID:     "user",
+		UserName:   "u",
+		ReplyCtx:   "ctx",
+	}
+	engine.cmdSquadReplan(platform, msg, []string{run.RunID, "我想改计划"})
+	reply := lastPlatformReply(platform)
+	if !strings.Contains(reply, "计划已确认") {
+		t.Fatalf("unexpected reject reply: %s", reply)
+	}
+	updated, err := engine.squadStore.GetRun(run.RunID)
+	if err != nil {
+		t.Fatalf("load run failed: %v", err)
+	}
+	if updated.Phase != SquadPhaseWaitTaskApprove || !updated.PlanApproved {
+		t.Fatalf("approved run should keep original state, got status=%s phase=%s plan_approved=%t", updated.Status, updated.Phase, updated.PlanApproved)
+	}
+}
+
+func TestCmdSquadReplan_AllowWhenAlreadyPlanning(t *testing.T) {
+	platform := &stubPlatform{name: "feishu"}
+	engine := NewEngine(
+		"squad-cmd-test",
+		&stubAgent{session: newStubAgentSession(make(chan Event))},
+		[]Platform{platform},
+		filepath.Join(t.TempDir(), "sessions", "sessions.json"),
+		LangChinese,
+	)
+	t.Cleanup(func() { _ = engine.Stop() })
+
+	run := &SquadRun{
+		RunID:           "squad_test_replan_planning",
+		Status:          SquadStatusRunning,
+		Phase:           SquadPhasePlanning,
+		OwnerSessionKey: "feishu:chat:user",
+		RepoPath:        `G:\demo\repo`,
+		TaskPrompt:      "示例需求",
+		PlannerRole:     "jarvis",
+		ExecutorRole:    "xingzou",
+		ReviewerRole:    "jianzhu",
+		PlanApproved:    false,
+		RoleRuntime: map[string]SquadRoleRuntime{
+			"jarvis": {Role: "jarvis", SocketPath: `D:\tmp\missing.sock`},
+		},
+	}
+	if err := engine.squadStore.SaveRun(run); err != nil {
+		t.Fatalf("save run failed: %v", err)
+	}
+	// Simulate stale running marker to cover stopSquadRunner + restart path.
+	engine.squadMu.Lock()
+	engine.squadRuns[run.RunID] = func() {}
+	engine.squadMu.Unlock()
+
+	msg := &Message{
+		SessionKey: "feishu:chat:user",
+		Platform:   "feishu",
+		UserID:     "user",
+		UserName:   "u",
+		ReplyCtx:   "ctx",
+	}
+	engine.cmdSquadReplan(platform, msg, []string{run.RunID, "按模块边界重做"})
+	reply := lastPlatformReply(platform)
+	if !strings.Contains(reply, "已发起计划重做") {
+		t.Fatalf("unexpected reply: %s", reply)
+	}
+}
+
 func TestCmdSquadSkipTask_WaitTaskApproval(t *testing.T) {
 	platform := &stubPlatform{name: "feishu"}
 	engine := NewEngine(

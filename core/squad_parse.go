@@ -246,6 +246,10 @@ func renderSquadPlanMarkdown(run *SquadRun) string {
 	}
 	b.WriteString("\n## 需求\n\n")
 	b.WriteString(strings.TrimSpace(run.TaskPrompt) + "\n\n")
+	if strings.TrimSpace(run.PlanReworkNote) != "" {
+		b.WriteString("## 本轮计划重做要求\n\n")
+		b.WriteString(strings.TrimSpace(run.PlanReworkNote) + "\n\n")
+	}
 	b.WriteString("## 方案摘要\n\n")
 	b.WriteString(fmt.Sprintf("### %s\n\n", emptyAs(run.Plan.Title, "执行方案")))
 	b.WriteString(emptyAs(run.Plan.Overview, "（无）") + "\n\n")

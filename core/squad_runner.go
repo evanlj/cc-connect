@@ -149,6 +149,19 @@ func (e *Engine) runSquad(ctx context.Context, runID string) {
 		return
 	}
 
+	// phase 2.5: re-plan without rebooting role processes.
+	// This branch is used by `/squad replan ...` which sets phase=planning.
+	if run.Phase == SquadPhasePlanning && !run.PlanApproved {
+		if isStopped() {
+			return
+		}
+		if err := e.runSquadPlanning(ctx, run); err != nil {
+			_ = e.failSquadRun(run.RunID, err.Error())
+			return
+		}
+		return
+	}
+
 	// phase 3: execution-review loop.
 	if run.PlanApproved && (run.Phase == SquadPhaseExecuting || run.Phase == SquadPhaseReviewing || run.Phase == SquadPhaseWaitPlanApprove || run.Phase == SquadPhaseWaitTaskApprove || run.Phase == SquadPhaseWaitReviewJudge || run.Phase == SquadPhasePlanning) {
 		if err := e.runSquadExecutionLoop(ctx, run); err != nil {
@@ -559,6 +572,11 @@ func buildSquadPlannerPrompt(run *SquadRun) string {
 	b.WriteString("你是方案师（Planner）。请基于需求输出可执行任务拆解。\n")
 	b.WriteString(fmt.Sprintf("仓库路径：%s\n", run.RepoPath))
 	b.WriteString(fmt.Sprintf("需求：%s\n\n", run.TaskPrompt))
+	if strings.TrimSpace(run.PlanReworkNote) != "" {
+		b.WriteString("本轮为计划重做。用户指出上版计划存在问题，请优先修正以下点：\n")
+		b.WriteString(strings.TrimSpace(run.PlanReworkNote))
+		b.WriteString("\n\n")
+	}
 	b.WriteString("要求：\n")
 	b.WriteString("1) 任务必须可执行、可审核；\n")
 	b.WriteString("2) 每个任务要有验收标准；\n")

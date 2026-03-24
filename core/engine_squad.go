@@ -31,6 +31,8 @@ func (e *Engine) cmdSquad(p Platform, msg *Message, args []string) {
 		e.cmdSquadStart(p, msg, args[1:])
 	case "approve-plan":
 		e.cmdSquadApprovePlan(p, msg, args[1:])
+	case "replan":
+		e.cmdSquadReplan(p, msg, args[1:])
 	case "approve-task":
 		e.cmdSquadApproveTask(p, msg, args[1:])
 	case "skip-task":
@@ -218,6 +220,127 @@ func (e *Engine) cmdSquadApprovePlan(p Platform, msg *Message, args []string) {
 	} else {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ Plan approved: `%s`\nNext, confirm a task with `/squad approve-task %s <task_id>`.", run.RunID, run.RunID))
 	}
+}
+
+func (e *Engine) cmdSquadReplan(p Platform, msg *Message, args []string) {
+	isZh := e.i18n.CurrentLang() == LangChinese
+	if len(args) < 2 {
+		if isZh {
+			e.reply(p, msg.ReplyCtx, "用法：`/squad replan <run_id> <不通过原因与重做方向>`")
+		} else {
+			e.reply(p, msg.ReplyCtx, "Usage: `/squad replan <run_id> <reason_and_replan_direction>`")
+		}
+		return
+	}
+
+	runID := strings.TrimSpace(args[0])
+	note := strings.TrimSpace(strings.Join(args[1:], " "))
+	if note == "" {
+		if isZh {
+			e.reply(p, msg.ReplyCtx, "❌ 请提供“计划不通过原因与重做方向”。")
+		} else {
+			e.reply(p, msg.ReplyCtx, "❌ Please provide replan reason and direction.")
+		}
+		return
+	}
+
+	run, err := e.squadStore.GetRun(runID)
+	if err != nil {
+		if os.IsNotExist(err) {
+			if isZh {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ 未找到 run：`%s`", runID))
+			} else {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Run not found: `%s`", runID))
+			}
+			return
+		}
+		if isZh {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ 读取 run 失败：%v", err))
+		} else {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Failed to load run: %v", err))
+		}
+		return
+	}
+	if run.Status == SquadStatusCompleted {
+		if isZh {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ run `%s` 已完成，不能重做计划。", runID))
+		} else {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ run `%s` is completed; cannot replan.", runID))
+		}
+		return
+	}
+	if run.Status == SquadStatusStopped {
+		if isZh {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ run `%s` 已停止，不能重做计划。", runID))
+		} else {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ run `%s` is stopped; cannot replan.", runID))
+		}
+		return
+	}
+	if run.PlanApproved {
+		if isZh {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ run `%s` 的计划已确认并进入执行流程，不能重做计划。请新建 run。", runID))
+		} else {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Plan for `%s` is already approved and in execution. Please start a new run.", runID))
+		}
+		return
+	}
+	if run.Phase != SquadPhaseWaitPlanApprove && run.Phase != SquadPhasePlanning {
+		if isZh {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ 当前阶段 `%s` 不支持重做计划；仅在等待计划确认或计划生成阶段可重做。", run.Phase))
+		} else {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Replan is only allowed in wait_plan_approval/planning phase (current=`%s`).", run.Phase))
+		}
+		return
+	}
+
+	run.Status = SquadStatusRunning
+	run.Phase = SquadPhasePlanning
+	run.PlanApproved = false
+	run.PlanReworkNote = note
+	run.Plan = SquadPlan{}
+	run.CurrentTask = 0
+	run.CurrentRound = 0
+	run.ReworkCount = 0
+	run.TaskApprovedID = ""
+	run.TaskPendingID = ""
+	run.ReviewPendingTask = ""
+	run.ReviewPendingRound = 0
+	run.ReviewPendingCP = ""
+	run.UserReworkNote = ""
+	run.StopReason = ""
+	run.ErrorMessage = ""
+
+	if err := e.squadStore.SaveRun(run); err != nil {
+		if isZh {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ 更新 run 失败：%v", err))
+		} else {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Failed to update run: %v", err))
+		}
+		return
+	}
+	_ = e.squadStore.AppendEvent(run.RunID, "info", "plan rework requested by user", map[string]any{
+		"note": truncateStr(note, 260),
+	})
+	// Ensure a fresh runner goroutine picks up the updated planning phase.
+	e.stopSquadRunner(run.RunID)
+	if err := e.startSquadRunner(run.RunID); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "already running") {
+			_ = e.failSquadRun(run.RunID, err.Error())
+			if isZh {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ 重做计划失败：%v", err))
+			} else {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Failed to replan: %v", err))
+			}
+			return
+		}
+	}
+
+	if isZh {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("🔄 已发起计划重做：`%s`\n重做要求：%s\n\n稍后请查看新计划并确认：`/squad approve-plan %s`", run.RunID, truncateStr(note, 160), run.RunID))
+		return
+	}
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf("🔄 Replan requested: `%s`\nDirection: %s\n\nReview and approve new plan: `/squad approve-plan %s`", run.RunID, truncateStr(note, 120), run.RunID))
 }
 
 func (e *Engine) cmdSquadApproveTask(p Platform, msg *Message, args []string) {
@@ -974,6 +1097,7 @@ func (e *Engine) squadUsage(isZh bool) string {
 			"- `/squad show-plan <run_id>`\n" +
 			"- `/squad show-task <run_id> [task_id|task_index|current]`\n" +
 			"- `/squad approve-plan <run_id>`\n" +
+			"- `/squad replan <run_id> <不通过原因与重做方向>`\n" +
 			"- `/squad approve-task <run_id> [task_id|task_index|current]`\n" +
 			"- `/squad skip-task <run_id> [跳过原因]`\n" +
 			"- `/squad judge-review <run_id> pass|rework [原因与修改方案]`\n" +
@@ -986,6 +1110,7 @@ func (e *Engine) squadUsage(isZh bool) string {
 		"- `/squad show-plan <run_id>`\n" +
 		"- `/squad show-task <run_id> [task_id|task_index|current]`\n" +
 		"- `/squad approve-plan <run_id>`\n" +
+		"- `/squad replan <run_id> <reason_and_replan_direction>`\n" +
 		"- `/squad approve-task <run_id> [task_id|task_index|current]`\n" +
 		"- `/squad skip-task <run_id> [reason]`\n" +
 		"- `/squad judge-review <run_id> pass|rework [reason_and_plan]`\n" +

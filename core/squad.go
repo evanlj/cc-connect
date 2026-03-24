@@ -119,6 +119,7 @@ type SquadRun struct {
 	ReviewPendingTask  string                      `json:"review_pending_task,omitempty"`
 	ReviewPendingRound int                         `json:"review_pending_round,omitempty"`
 	ReviewPendingCP    string                      `json:"review_pending_checkpoint,omitempty"`
+	PlanReworkNote     string                      `json:"plan_rework_note,omitempty"`
 	UserReworkNote     string                      `json:"user_rework_note,omitempty"`
 	StopReason         string                      `json:"stop_reason,omitempty"`
 	ErrorMessage       string                      `json:"error_message,omitempty"`

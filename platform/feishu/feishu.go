@@ -1180,6 +1180,7 @@ func buildSquadControlCardJSON(defaultRunID string) string {
 			squadV2Col("auto", squadV2SubmitBtn("sq_btn_stat", "default", "状态", map[string]any{"cc_action": "squad_cmd", "cmd": "status"})),
 			squadV2Col("auto", squadV2SubmitBtn("sq_btn_plan", "default", "计划", map[string]any{"cc_action": "squad_cmd", "cmd": "show_plan"})),
 			squadV2Col("auto", squadV2SubmitBtn("sq_btn_aplan", "default", "批准", map[string]any{"cc_action": "squad_cmd", "cmd": "approve_plan"})),
+			squadV2Col("auto", squadV2SubmitBtn("sq_btn_replan", "default", "计划重做", map[string]any{"cc_action": "squad_cmd", "cmd": "replan"})),
 		),
 		squadV2Row(
 			squadV2Col("auto", squadV2SubmitBtn("sq_btn_task", "default", "任务", map[string]any{"cc_action": "squad_cmd", "cmd": "show_task"})),
@@ -1421,6 +1422,15 @@ func buildSquadCommandByAction(cmd, runID, reworkNote string) (string, string) {
 			return "run_id 示例：squad_20260321_xxx", tip
 		}
 		return "/squad approve-plan " + id, "正在批准计划"
+	case "replan":
+		id, tip, ok := requireRunID()
+		if !ok {
+			return "run_id 示例：squad_20260321_xxx", tip
+		}
+		if reworkNote == "" {
+			return "请先填写不通过原因与重做方向，然后再点击“计划重做”", "重做计划信息为空"
+		}
+		return "/squad replan " + id + " " + reworkNote, "正在重做计划"
 	case "approve_task":
 		id, tip, ok := requireRunID()
 		if !ok {
