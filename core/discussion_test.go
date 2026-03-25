@@ -10,6 +10,7 @@ import (
 
 func TestParseDebateStartOptions(t *testing.T) {
 	t.Run("ok", func(t *testing.T) {
+		repo := filepath.ToSlash(t.TempDir())
 		opts, err := parseDebateStartOptions([]string{
 			"--mode", "consensus",
 			"--preset", "tianji-five",
@@ -17,6 +18,8 @@ func TestParseDebateStartOptions(t *testing.T) {
 			"--speaking-policy", "host-decide",
 			"--host", "jarvis",
 			"--participants", "jianzhu,wendan",
+			"--repo", repo,
+			"--provider", "codez",
 			"如何",
 			"实现",
 			"单机多机器人讨论",
@@ -41,6 +44,12 @@ func TestParseDebateStartOptions(t *testing.T) {
 		}
 		if len(opts.Participants) != 2 || opts.Participants[0] != "jianzhu" || opts.Participants[1] != "wendan" {
 			t.Fatalf("participants mismatch: %+v", opts.Participants)
+		}
+		if opts.RepoPath != filepath.Clean(repo) {
+			t.Fatalf("repo path mismatch: %q", opts.RepoPath)
+		}
+		if opts.Provider != "codez" {
+			t.Fatalf("provider mismatch: %q", opts.Provider)
 		}
 		if opts.Question != "如何 实现 单机多机器人讨论" {
 			t.Fatalf("question mismatch: %q", opts.Question)
@@ -75,6 +84,30 @@ func TestParseDebateStartOptions(t *testing.T) {
 		}
 		if err := ValidateDebateStartOptions(opts); err == nil {
 			t.Fatal("expected invalid mode error, got nil")
+		}
+	})
+
+	t.Run("repo path must be absolute", func(t *testing.T) {
+		opts := DebateStartOptions{
+			Mode:      DebateModeConsensus,
+			Question:  "q",
+			MaxRounds: 3,
+			RepoPath:  "relative/path",
+		}
+		if err := ValidateDebateStartOptions(opts); err == nil {
+			t.Fatal("expected repo_path absolute error, got nil")
+		}
+	})
+
+	t.Run("repo path must exist", func(t *testing.T) {
+		opts := DebateStartOptions{
+			Mode:      DebateModeConsensus,
+			Question:  "q",
+			MaxRounds: 3,
+			RepoPath:  filepath.Join(t.TempDir(), "missing"),
+		}
+		if err := ValidateDebateStartOptions(opts); err == nil {
+			t.Fatal("expected repo_path exists error, got nil")
 		}
 	})
 }

@@ -54,6 +54,7 @@ type Engine struct {
 	debateStore   *DebateStore
 	debateMu      sync.Mutex
 	debateRuns    map[string]context.CancelFunc
+	debateProc    *DebateProcessManager
 	instanceCli   *LocalInstanceClient
 	squadStore    *SquadStore
 	squadMu       sync.Mutex
@@ -108,6 +109,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		startedAt:         time.Now(),
 		debateStore:       NewDebateStore(debateRoot),
 		debateRuns:        make(map[string]context.CancelFunc),
+		debateProc:        NewDebateProcessManager(),
 		instanceCli:       NewLocalInstanceClient(),
 		squadStore:        NewSquadStore(squadRoot),
 		squadRuns:         make(map[string]context.CancelFunc),
@@ -257,6 +259,9 @@ func (e *Engine) Stop() error {
 		delete(e.debateRuns, roomID)
 	}
 	e.debateMu.Unlock()
+	if e.debateProc != nil {
+		e.debateProc.StopAll()
+	}
 
 	e.squadMu.Lock()
 	for runID, cancel := range e.squadRuns {

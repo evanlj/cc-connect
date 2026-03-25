@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -80,7 +81,33 @@ func (e *Engine) cmdDebateStart(p Platform, msg *Message, args []string) {
 	}
 
 	room := NewDebateRoom(msg.SessionKey, opts, time.Now())
+	if strings.TrimSpace(room.RepoPath) != "" {
+		if e.debateProc == nil {
+			if isZh {
+				e.reply(p, msg.ReplyCtx, "❌ debate 运行时管理器不可用。")
+			} else {
+				e.reply(p, msg.ReplyCtx, "❌ debate runtime manager is unavailable.")
+			}
+			return
+		}
+		runtimeRoles, runtimeMap, runtimeErr := e.debateProc.StartRoom(room, e.debateStore)
+		if runtimeErr != nil {
+			if isZh {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ 讨论运行时启动失败：%v", runtimeErr))
+			} else {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ Failed to start debate runtime: %v", runtimeErr))
+			}
+			return
+		}
+		room.Roles = runtimeRoles
+		room.RoleRuntime = runtimeMap
+		room.RuntimeEnabled = true
+		room.RuntimeRoot = resolveDebateRuntimeRoot(room.RoomID, e.debateStore)
+	}
 	if err := e.debateStore.SaveRoom(room); err != nil {
+		if room.RuntimeEnabled && e.debateProc != nil {
+			_ = e.debateProc.StopRoom(room.RoomID)
+		}
 		if isZh {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ 创建讨论房间失败：%v", err))
 		} else {
@@ -117,8 +144,8 @@ func (e *Engine) cmdDebateStart(p Platform, msg *Message, args []string) {
 			participants = strings.Join(room.RequestedParticipants, "、")
 		}
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(
-			"✅ 已创建并启动讨论：`%s`\n- 模式：`%s`\n- 主持人：`%s`\n- 预设：`%s`\n- 轮次参数：`%d`（consensus 模式仅作软参考）\n- 发言策略：`%s`\n- 建议参与者：%s\n- 主题：%s\n\n可用命令：`/debate status %s`、`/debate board %s`、`/debate topic %s <最终议题>`、`/debate decision %s approve|reject [反馈]`、`/debate participants %s 1,2,3`、`/debate stop %s`",
-			room.RoomID, room.Mode, emptyAs(room.HostRole, "jarvis"), room.Preset, room.MaxRounds, room.SpeakingPolicy, participants, room.Question,
+			"✅ 已创建并启动讨论：`%s`\n- 模式：`%s`\n- 主持人：`%s`\n- 预设：`%s`\n- 轮次参数：`%d`（consensus 模式仅作软参考）\n- 发言策略：`%s`\n- 建议参与者：%s\n- 主题：%s\n- repo：`%s`\n- provider：`%s`\n- runtime：`%t`\n\n可用命令：`/debate status %s`、`/debate board %s`、`/debate topic %s <最终议题>`、`/debate decision %s approve|reject [反馈]`、`/debate participants %s 1,2,3`、`/debate stop %s`",
+			room.RoomID, room.Mode, emptyAs(room.HostRole, "jarvis"), room.Preset, room.MaxRounds, room.SpeakingPolicy, participants, room.Question, emptyAs(room.RepoPath, "-"), emptyAs(room.Provider, "-"), room.RuntimeEnabled,
 			room.RoomID,
 			room.RoomID, room.RoomID, room.RoomID, room.RoomID, room.RoomID,
 		))
@@ -130,8 +157,8 @@ func (e *Engine) cmdDebateStart(p Platform, msg *Message, args []string) {
 		participants = strings.Join(room.RequestedParticipants, ", ")
 	}
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(
-		"✅ Debate created and started: `%s`\n- mode: `%s`\n- host_role: `%s`\n- preset: `%s`\n- rounds_param: `%d` (consensus uses unresolved issues for convergence)\n- speaking_policy: `%s`\n- suggested_participants: %s\n- topic: %s\n\nCommands: `/debate status %s`, `/debate board %s`, `/debate topic %s <final topic>`, `/debate decision %s approve|reject [feedback]`, `/debate participants %s 1,2,3`, `/debate stop %s`",
-		room.RoomID, room.Mode, emptyAs(room.HostRole, "jarvis"), room.Preset, room.MaxRounds, room.SpeakingPolicy, participants, room.Question,
+		"✅ Debate created and started: `%s`\n- mode: `%s`\n- host_role: `%s`\n- preset: `%s`\n- rounds_param: `%d` (consensus uses unresolved issues for convergence)\n- speaking_policy: `%s`\n- suggested_participants: %s\n- topic: %s\n- repo: `%s`\n- provider: `%s`\n- runtime: `%t`\n\nCommands: `/debate status %s`, `/debate board %s`, `/debate topic %s <final topic>`, `/debate decision %s approve|reject [feedback]`, `/debate participants %s 1,2,3`, `/debate stop %s`",
+		room.RoomID, room.Mode, emptyAs(room.HostRole, "jarvis"), room.Preset, room.MaxRounds, room.SpeakingPolicy, participants, room.Question, emptyAs(room.RepoPath, "-"), emptyAs(room.Provider, "-"), room.RuntimeEnabled,
 		room.RoomID,
 		room.RoomID, room.RoomID, room.RoomID, room.RoomID, room.RoomID,
 	))
@@ -578,6 +605,7 @@ func (e *Engine) cmdDebateStatus(p Platform, msg *Message, args []string) {
 			body += "\n- runner: `inactive`"
 		}
 	}
+	body += formatDebateRuntimeRolesStatus(room, isZh)
 	e.reply(p, msg.ReplyCtx, body)
 }
 
@@ -631,6 +659,9 @@ func (e *Engine) cmdDebateStop(p Platform, msg *Message, args []string) {
 		Content:  "room_stopped:manual_stop",
 	})
 	_ = e.stopDebateRunner(room.RoomID)
+	if e.debateProc != nil {
+		_ = e.debateProc.StopRoom(room.RoomID)
+	}
 
 	if isZh {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ 讨论房间已停止：`%s`", room.RoomID))
@@ -800,6 +831,10 @@ func parseDebateStartOptions(args []string) (DebateStartOptions, error) {
 			opts.HostRole = val
 		case "--participants":
 			opts.Participants = parseRoleCSV(val)
+		case "--repo", "--repo-path":
+			opts.RepoPath = val
+		case "--provider":
+			opts.Provider = val
 		default:
 			return opts, fmt.Errorf("unknown option %s", key)
 		}
@@ -822,7 +857,7 @@ func formatDebateRoomStatus(room *DebateRoom, isZh bool) string {
 		confirmed := strings.Join(nonEmptyOrDash(room.ConfirmedParticipants), "、")
 		requested := strings.Join(nonEmptyOrDash(room.RequestedParticipants), "、")
 		return fmt.Sprintf(
-			"🧭 讨论房间状态\n\n- room_id: `%s`\n- status: `%s`\n- mode: `%s`\n- phase: `%s`\n- iteration: `%d`\n- host_role: `%s`\n- user_review: `%s`\n- requested_participants: %s\n- confirmed_participants: %s\n- topic_draft: %s\n- final_topic: %s\n- preset: `%s`\n- rounds_param: `%d`\n- current_round: `%d`\n- speaking_policy: `%s`\n- owner_session: `%s`\n- created_at: `%s`\n- updated_at: `%s`\n- topic: %s",
+			"🧭 讨论房间状态\n\n- room_id: `%s`\n- status: `%s`\n- mode: `%s`\n- phase: `%s`\n- iteration: `%d`\n- host_role: `%s`\n- user_review: `%s`\n- requested_participants: %s\n- confirmed_participants: %s\n- topic_draft: %s\n- final_topic: %s\n- preset: `%s`\n- rounds_param: `%d`\n- current_round: `%d`\n- speaking_policy: `%s`\n- owner_session: `%s`\n- repo_path: `%s`\n- provider: `%s`\n- runtime_enabled: `%t`\n- runtime_root: `%s`\n- created_at: `%s`\n- updated_at: `%s`\n- topic: %s",
 			room.RoomID,
 			room.Status,
 			emptyAs(room.Mode, DebateModeClassic),
@@ -839,6 +874,10 @@ func formatDebateRoomStatus(room *DebateRoom, isZh bool) string {
 			room.CurrentRound,
 			room.SpeakingPolicy,
 			room.OwnerSessionKey,
+			emptyAs(room.RepoPath, "-"),
+			emptyAs(room.Provider, "-"),
+			room.RuntimeEnabled,
+			emptyAs(room.RuntimeRoot, "-"),
 			room.CreatedAt.Format(time.RFC3339),
 			room.UpdatedAt.Format(time.RFC3339),
 			room.Question,
@@ -846,7 +885,7 @@ func formatDebateRoomStatus(room *DebateRoom, isZh bool) string {
 	}
 
 	return fmt.Sprintf(
-		"🧭 Debate room status\n\n- room_id: `%s`\n- status: `%s`\n- mode: `%s`\n- phase: `%s`\n- iteration: `%d`\n- host_role: `%s`\n- user_review: `%s`\n- requested_participants: %s\n- confirmed_participants: %s\n- topic_draft: %s\n- final_topic: %s\n- preset: `%s`\n- rounds_param: `%d`\n- current_round: `%d`\n- speaking_policy: `%s`\n- owner_session: `%s`\n- created_at: `%s`\n- updated_at: `%s`\n- topic: %s",
+		"🧭 Debate room status\n\n- room_id: `%s`\n- status: `%s`\n- mode: `%s`\n- phase: `%s`\n- iteration: `%d`\n- host_role: `%s`\n- user_review: `%s`\n- requested_participants: %s\n- confirmed_participants: %s\n- topic_draft: %s\n- final_topic: %s\n- preset: `%s`\n- rounds_param: `%d`\n- current_round: `%d`\n- speaking_policy: `%s`\n- owner_session: `%s`\n- repo_path: `%s`\n- provider: `%s`\n- runtime_enabled: `%t`\n- runtime_root: `%s`\n- created_at: `%s`\n- updated_at: `%s`\n- topic: %s",
 		room.RoomID,
 		room.Status,
 		emptyAs(room.Mode, DebateModeClassic),
@@ -863,6 +902,10 @@ func formatDebateRoomStatus(room *DebateRoom, isZh bool) string {
 		room.CurrentRound,
 		room.SpeakingPolicy,
 		room.OwnerSessionKey,
+		emptyAs(room.RepoPath, "-"),
+		emptyAs(room.Provider, "-"),
+		room.RuntimeEnabled,
+		emptyAs(room.RuntimeRoot, "-"),
 		room.CreatedAt.Format(time.RFC3339),
 		room.UpdatedAt.Format(time.RFC3339),
 		room.Question,
@@ -873,7 +916,7 @@ func (e *Engine) debateUsage(isZh bool) string {
 	if isZh {
 		return "用法：\n" +
 			"- `/debate start --mode classic --preset tianji-five --rounds 3 --speaking-policy host-decide <问题>`（host-decide 终轮自动全员发言）\n" +
-			"- `/debate start --mode consensus --host jarvis --participants jianzhu,wendan --rounds 4 <问题>`\n" +
+			"- `/debate start --mode consensus --host jarvis --participants jianzhu,wendan --rounds 4 [--repo D:/your-repo] [--provider codez] <问题>`\n" +
 			"- `/debate topic <room_id> <最终议题>`（主持人给出增强议题草案后，用户提交最终议题）\n" +
 			"- `/debate answer <room_id> <最终议题>`（兼容旧命令，等价于 `/debate topic`）\n" +
 			"- `/debate decision <room_id> approve|reject [反馈]`（主持人首轮方案用户评审）\n" +
@@ -886,7 +929,7 @@ func (e *Engine) debateUsage(isZh bool) string {
 	}
 	return "Usage:\n" +
 		"- `/debate start --mode classic --preset tianji-five --rounds 3 --speaking-policy host-decide <question>` (host-decide auto includes all workers in final round)\n" +
-		"- `/debate start --mode consensus --host jarvis --participants jianzhu,wendan --rounds 4 <question>`\n" +
+		"- `/debate start --mode consensus --host jarvis --participants jianzhu,wendan --rounds 4 [--repo D:/your-repo] [--provider codez] <question>`\n" +
 		"- `/debate topic <room_id> <final topic>` (submit final topic after host draft)\n" +
 		"- `/debate answer <room_id> <final topic>` (legacy alias for `/debate topic`)\n" +
 		"- `/debate decision <room_id> approve|reject [feedback]` (user review for host first proposal)\n" +
@@ -1035,6 +1078,35 @@ func formatParticipantCandidateLabels(room *DebateRoom, candidates []string, isZ
 		sep = "; "
 	}
 	return strings.Join(parts, sep)
+}
+
+func formatDebateRuntimeRolesStatus(room *DebateRoom, isZh bool) string {
+	if room == nil || len(room.RoleRuntime) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(room.RoleRuntime))
+	for role := range room.RoleRuntime {
+		keys = append(keys, role)
+	}
+	sort.Strings(keys)
+
+	var b strings.Builder
+	if isZh {
+		b.WriteString("\n- runtime_roles:")
+	} else {
+		b.WriteString("\n- runtime_roles:")
+	}
+	for _, role := range keys {
+		rt := room.RoleRuntime[role]
+		socketState := "missing"
+		if fi, err := os.Stat(rt.SocketPath); err == nil && !fi.IsDir() {
+			socketState = "ready"
+		}
+		display := emptyAs(rt.DisplayName, role)
+		b.WriteString(fmt.Sprintf("\n  - %s(%s): project=`%s`, pid=`%d`, socket=`%s`, socket_state=`%s`",
+			display, role, emptyAs(rt.ProjectName, "-"), rt.PID, emptyAs(rt.SocketPath, "-"), socketState))
+	}
+	return b.String()
 }
 
 func formatDebateBlackboard(board *DebateBlackboard, room *DebateRoom, isZh bool) string {

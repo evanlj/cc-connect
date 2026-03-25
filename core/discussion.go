@@ -42,29 +42,34 @@ type DebateRole struct {
 }
 
 type DebateRoom struct {
-	RoomID                string       `json:"room_id"`
-	Status                string       `json:"status"`
-	CreatedAt             time.Time    `json:"created_at"`
-	UpdatedAt             time.Time    `json:"updated_at"`
-	OwnerSessionKey       string       `json:"owner_session_key"`
-	GroupChatID           string       `json:"group_chat_id,omitempty"`
-	Question              string       `json:"question"`
-	TopicDraft            string       `json:"topic_draft,omitempty"`
-	RefinedQuestion       string       `json:"refined_question,omitempty"`
-	Preset                string       `json:"preset"`
-	MaxRounds             int          `json:"max_rounds"`
-	CurrentRound          int          `json:"current_round"`
-	SpeakingPolicy        string       `json:"speaking_policy"`
-	Mode                  string       `json:"mode,omitempty"`
-	Phase                 string       `json:"phase,omitempty"`
-	Iteration             int          `json:"iteration,omitempty"`
-	HostRole              string       `json:"host_role,omitempty"`
-	RequestedParticipants []string     `json:"requested_participants,omitempty"`
-	ConfirmedParticipants []string     `json:"confirmed_participants,omitempty"`
-	UserReviewStatus      string       `json:"user_review_status,omitempty"`
-	UserReviewFeedback    string       `json:"user_review_feedback,omitempty"`
-	Roles                 []DebateRole `json:"roles"`
-	StopReason            string       `json:"stop_reason,omitempty"`
+	RoomID                string                      `json:"room_id"`
+	Status                string                      `json:"status"`
+	CreatedAt             time.Time                   `json:"created_at"`
+	UpdatedAt             time.Time                   `json:"updated_at"`
+	OwnerSessionKey       string                      `json:"owner_session_key"`
+	GroupChatID           string                      `json:"group_chat_id,omitempty"`
+	RepoPath              string                      `json:"repo_path,omitempty"`
+	Provider              string                      `json:"provider,omitempty"`
+	RuntimeEnabled        bool                        `json:"runtime_enabled,omitempty"`
+	RuntimeRoot           string                      `json:"runtime_root,omitempty"`
+	Question              string                      `json:"question"`
+	TopicDraft            string                      `json:"topic_draft,omitempty"`
+	RefinedQuestion       string                      `json:"refined_question,omitempty"`
+	Preset                string                      `json:"preset"`
+	MaxRounds             int                         `json:"max_rounds"`
+	CurrentRound          int                         `json:"current_round"`
+	SpeakingPolicy        string                      `json:"speaking_policy"`
+	Mode                  string                      `json:"mode,omitempty"`
+	Phase                 string                      `json:"phase,omitempty"`
+	Iteration             int                         `json:"iteration,omitempty"`
+	HostRole              string                      `json:"host_role,omitempty"`
+	RequestedParticipants []string                    `json:"requested_participants,omitempty"`
+	ConfirmedParticipants []string                    `json:"confirmed_participants,omitempty"`
+	UserReviewStatus      string                      `json:"user_review_status,omitempty"`
+	UserReviewFeedback    string                      `json:"user_review_feedback,omitempty"`
+	Roles                 []DebateRole                `json:"roles"`
+	RoleRuntime           map[string]SquadRoleRuntime `json:"role_runtime,omitempty"`
+	StopReason            string                      `json:"stop_reason,omitempty"`
 }
 
 type DebateTranscriptEntry struct {
@@ -84,6 +89,8 @@ type DebateStartOptions struct {
 	Mode           string
 	HostRole       string
 	Participants   []string
+	RepoPath       string
+	Provider       string
 	Question       string
 }
 
@@ -392,6 +399,10 @@ func NewDebateRoom(ownerSessionKey string, opts DebateStartOptions, now time.Tim
 		UpdatedAt:             now,
 		OwnerSessionKey:       ownerSessionKey,
 		GroupChatID:           extractGroupChatID(ownerSessionKey),
+		RepoPath:              strings.TrimSpace(normalized.RepoPath),
+		Provider:              strings.TrimSpace(normalized.Provider),
+		RuntimeEnabled:        false,
+		RuntimeRoot:           "",
 		Question:              strings.TrimSpace(normalized.Question),
 		Preset:                normalized.Preset,
 		MaxRounds:             normalized.MaxRounds,
@@ -405,6 +416,7 @@ func NewDebateRoom(ownerSessionKey string, opts DebateStartOptions, now time.Tim
 		ConfirmedParticipants: nil,
 		UserReviewStatus:      "pending",
 		Roles:                 roles,
+		RoleRuntime:           map[string]SquadRoleRuntime{},
 	}
 }
 
@@ -433,6 +445,11 @@ func NormalizeDebateStartOptions(in DebateStartOptions) DebateStartOptions {
 	}
 	out.HostRole = normalizeRoleToken(out.HostRole)
 	out.Participants = normalizeRoleTokens(out.Participants)
+	out.RepoPath = strings.TrimSpace(out.RepoPath)
+	if out.RepoPath != "" && filepath.IsAbs(out.RepoPath) {
+		out.RepoPath = filepath.Clean(out.RepoPath)
+	}
+	out.Provider = strings.TrimSpace(out.Provider)
 	out.Question = normalizeDebateQuestion(out.Question)
 	return out
 }
@@ -453,6 +470,19 @@ func ValidateDebateStartOptions(in DebateStartOptions) error {
 	}
 	if strings.TrimSpace(in.HostRole) != "" && normalizeRoleToken(in.HostRole) == "" {
 		return fmt.Errorf("host_role is invalid")
+	}
+	repoPath := strings.TrimSpace(in.RepoPath)
+	if repoPath != "" {
+		if !filepath.IsAbs(repoPath) {
+			return fmt.Errorf("repo_path must be an absolute path")
+		}
+		fi, err := os.Stat(repoPath)
+		if err != nil {
+			return fmt.Errorf("repo_path is invalid: %w", err)
+		}
+		if !fi.IsDir() {
+			return fmt.Errorf("repo_path must be a directory")
+		}
 	}
 	return nil
 }
